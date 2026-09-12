@@ -1,0 +1,36 @@
+# IBKR Client Portal Gateway — headless Docker container
+# Auto-authenticates with TOTP, exposes REST API on :5000
+#
+# Prerequisites:
+#   1. Fill in IBKR_USERNAME, IBKR_PASSWORD, IBKR_TOTP_SECRET in .env
+#   2. Enable TOTP 2FA on your IBKR account (Client Portal → Settings → Secure Login)
+#   3. Have a market data subscription (Client Portal → Settings → Market Data Subscriptions)
+#
+# Usage:
+#   docker compose up -d ibkr-gateway   # start gateway
+#   docker compose logs -f ibkr-gateway # view logs
+#   docker compose down ibkr-gateway    # stop gateway
+#
+# Verify:
+#   curl -k https://localhost:5000/v1/portal/iserver/auth/status
+
+services:
+  ibkr-gateway:
+    image: mjherrma/ib-gateway-service:3.0.9
+    container_name: ibkr-gateway
+    restart: unless-stopped
+    ports:
+      - "5000:5000"   # IBKR Client Portal REST API (HTTPS, self-signed cert)
+      - "5050:5050"   # Service control API (start/stop/auth)
+    environment:
+      - IBKR_USERNAME=${IBKR_USERNAME}
+      - IBKR_PASSWORD=${IBKR_PASSWORD}
+      - IBKR_TOTP_SECRET=${IBKR_TOTP_SECRET}
+      - IBKR_PAPER_TRADING=${IBKR_PAPER_TRADING:-true}
+    # Gateway needs to stay alive — auto-restart handles crashes
+    healthcheck:
+      test: ["CMD", "curl", "-kf", "https://localhost:5000/v1/portal/iserver/auth/status"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
