@@ -155,6 +155,45 @@ export function computeVixTermStructure(vixData, vx1Data, vx2Data) {
 }
 
 /**
+ * Term structure from the CBOE constant-maturity VIX index family. Yahoo does
+ * not publish continuous VIX futures (^VX1/^VX2 return no data), but it does
+ * publish ^VIX9D (9-day), ^VIX3M (93-day) and ^VIX6M (6-month) — the same
+ * curve CBOE uses for its VIX/VIX3M ratio. VIX3M plays the role of the
+ * "forward" point: VIX3M > VIX = contango (normal); VIX > VIX3M =
+ * backwardation (stress). Source: CBOE VIX index methodology
+ * (https://www.cboe.com/tradable_products/vix/).
+ *
+ * @param {number|null} vix
+ * @param {{vix9d?:number|null, vix3m?:number|null, vix6m?:number|null}} curve
+ * @returns {object|null} same shape as computeVixTermStructure plus
+ *   { vix9d, vix3m, vix6m, ratio, source:'cboe-index' }
+ */
+export function computeVixIndexCurve(vix, curve = {}) {
+  if (vix == null || isNaN(vix)) return null;
+  const vix9d = curve.vix9d ?? null;
+  const vix3m = curve.vix3m ?? null;
+  const vix6m = curve.vix6m ?? null;
+  if (vix3m == null || isNaN(vix3m) || vix3m <= 0) return null;
+
+  const spread = vix3m - vix;
+  const contango = vix3m > vix;
+  const backwardation = vix3m < vix;
+  const slope = vix6m != null && vix6m > 0 ? (vix6m - vix) / vix6m : null;
+  const ratio = vix / vix3m;
+
+  let label;
+  if (backwardation) label = 'Backwardation (stress)';
+  else if (contango) label = vix6m != null && vix6m >= vix3m ? 'Contango (normal)' : 'Contango (flat)';
+  else label = 'Flat';
+
+  return {
+    vix, vx1: null, vx2: null, vix9d, vix3m, vix6m,
+    contango, backwardation, spread, slope, ratio, label,
+    source: 'cboe-index',
+  };
+}
+
+/**
  * Compute the realized volatility of the VIX itself ("vol of vol").
  * Same math as computeRealizedVolatility but applied to VIX closes.
  * @param {number[]} closes - VIX daily closes
@@ -174,9 +213,11 @@ export function computeVolOfVol(closes, period = 20) {
  * @param {{closes:number[], dates?:string[]}} spyHistory  - SPY daily history
  * @param {{closes:number[], dates?:string[]}} [vx1History] - VIX front-month futures
  * @param {{closes:number[], dates?:string[]}} [vx2History] - VIX second-month futures
+ * @param {{vix9d?:{closes:number[]}, vix3m?:{closes:number[]}, vix6m?:{closes:number[]}}} [curveHistories]
+ *   CBOE constant-maturity VIX indices; used when futures are unavailable
  * @returns {object} analysis payload
  */
-export function analyzeVolatility(vixHistory, spyHistory, vx1History, vx2History) {
+export function analyzeVolatility(vixHistory, spyHistory, vx1History, vx2History, curveHistories = {}) {
   // Filter out null/undefined closes (e.g., current trading day with no close yet)
   const filterValid = (history) => {
     if (!history?.closes) return { closes: [], dates: [] };
@@ -219,13 +260,23 @@ export function analyzeVolatility(vixHistory, spyHistory, vx1History, vx2History
   // Term structure (optional) — filter nulls from VX data too
   const vx1 = filterValid(vx1History);
   const vx2 = filterValid(vx2History);
-  const termStructure = (vx1.closes.length || vx2.closes.length)
-    ? computeVixTermStructure(
-        { closes: vixCloses },
-        vx1,
-        vx2,
-      )
+  const lastOf = (h) => {
+    const c = filterValid(h).closes;
+    return c.length ? c[c.length - 1] : null;
+  };
+  const futuresStructure = vx1.closes.length
+    ? computeVixTermStructure({ closes: vixCloses }, vx1, vx2)
     : null;
+  const indexCurve = computeVixIndexCurve(vixLevel, {
+    vix9d: lastOf(curveHistories.vix9d),
+    vix3m: lastOf(curveHistories.vix3m),
+    vix6m: lastOf(curveHistories.vix6m),
+  });
+  // Prefer real futures when present; otherwise use the CBOE index curve.
+  const termStructure = futuresStructure || indexCurve
+    || ((vx1.closes.length || vx2.closes.length)
+      ? computeVixTermStructure({ closes: vixCloses }, vx1, vx2)
+      : null);
 
   // Human-readable description
   const description = buildDescription({
@@ -290,7 +341,14 @@ function buildDescription({
     }
   }
 
-  if (termStructure && termStructure.label !== 'Unavailable') {
+  if (termStructure && termStructure.source === 'cboe-index') {
+    const r = termStructure.ratio;
+    if (termStructure.backwardation) {
+      parts.push(`VIX curve is inverted (VIX3M ${termStructure.vix3m.toFixed(2)} < VIX, ratio ${r.toFixed(2)}) — hedging demand elevated, stress signal.`);
+    } else if (termStructure.contango) {
+      parts.push(`VIX curve is in contango (VIX3M ${termStructure.vix3m.toFixed(2)} > VIX, ratio ${r.toFixed(2)}) — normal, calming; long-dated vol costs more than spot.`);
+    }
+  } else if (termStructure && termStructure.label !== 'Unavailable') {
     if (termStructure.backwardation) {
       parts.push(`Term structure is in backwardation (VX1 ${termStructure.vx1?.toFixed(2)} < VIX) — hedging demand elevated, stress signal.`);
     } else if (termStructure.contango) {

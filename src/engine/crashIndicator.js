@@ -105,15 +105,19 @@ function scoreTermStructure(termStructure) {
   if (!termStructure || termStructure.vix == null) {
     return { value: null, score: 0, note: 'Term structure unavailable' };
   }
-  if (termStructure.vx1 == null) {
-    return { value: null, score: 0, note: 'VX1 futures data unavailable' };
+  // Forward reference: VX1 futures when available, else the CBOE VIX3M index
+  // (see volatilityEngine.computeVixIndexCurve).
+  const fwd = termStructure.vx1 ?? termStructure.vix3m ?? null;
+  const fwdLabel = termStructure.vx1 != null ? 'VX1' : 'VIX3M';
+  if (fwd == null) {
+    return { value: null, score: 0, note: 'VIX forward curve unavailable' };
   }
-  const spread = termStructure.vix - termStructure.vx1; // positive = backwardation
+  const spread = termStructure.vix - fwd; // positive = backwardation
   if (spread <= 0) {
     return {
       value: spread,
       score: 5,
-      note: `Contango (VX1 ${termStructure.vx1.toFixed(1)} > VIX ${termStructure.vix.toFixed(1)}) — normal, calming`,
+      note: `Contango (${fwdLabel} ${fwd.toFixed(1)} > VIX ${termStructure.vix.toFixed(1)}) — normal, calming`,
     };
   }
   // Backwardation: 0-2 points = mild, 2-5 = moderate, >5 = severe
@@ -121,7 +125,7 @@ function scoreTermStructure(termStructure) {
   return {
     value: spread,
     score: score ?? 0,
-    note: `Backwardation (VX1 ${termStructure.vx1.toFixed(1)} < VIX ${termStructure.vix.toFixed(1)}) — hedging demand elevated, stress signal`,
+    note: `Backwardation (${fwdLabel} ${fwd.toFixed(1)} < VIX ${termStructure.vix.toFixed(1)}) — hedging demand elevated, stress signal`,
   };
 }
 

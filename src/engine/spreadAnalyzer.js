@@ -130,6 +130,11 @@ const midPrice = (c) => {
 
 const liquidityScore = (c) => (c.volume ?? 0) + (c.openInterest ?? 0);
 
+const hasTwoSidedQuote = (c) => (c.bid ?? 0) > 0 && (c.ask ?? 0) > 0 && c.ask >= c.bid;
+
+/** Bid/ask width of a contract; 0 when no two-sided quote (cannot measure). */
+const quoteWidth = (c) => (hasTwoSidedQuote(c) ? c.ask - c.bid : 0);
+
 // ── Strategy definitions ──────────────────────────────────────────────────
 
 /**
@@ -253,6 +258,9 @@ const STRATEGY_DEFS = {
  * @property {number} [minReturnOnCapital=0]          reject spreads whose maxProfit/maxLoss is below this (e.g. 3 = require 3:1)
  * @property {number} [minProbabilityOfProfit=0]      reject spreads with PoP below this (e.g. 0.30 = 30%)
  * @property {number} [maxBreakevenMoveRatio=Infinity] reject spreads whose breakeven move exceeds this multiple of the IV-implied expected move (e.g. 1.0 = breakeven must be within 1σ)
+ * @property {boolean} [requireOtmShort=false]        credit spreads only: reject when the short strike is in-the-money (bull put short ≥ spot, bear call short ≤ spot). ITM "credit" spreads are directional bets, not income trades.
+ * @property {boolean} [requireTwoSidedQuotes=false]  reject legs without a live bid AND ask (stale lastPrice fallbacks produce phantom prices, esp. on LEAPS)
+ * @property {number} [maxLegSpreadToWidth=Infinity]  reject when (ask−bid of long leg + ask−bid of short leg) / strike width exceeds this — the mid-price is noise when quotes are wider than the spread itself
  * @property {number} [riskFreeRate=0.045]
  * @property {number} [dividendYield=0]               annualised, used for forward-price drift in PoP calc (LEAPS-relevant)
  *
@@ -274,6 +282,9 @@ export function analyzeSpreads(params) {
     minReturnOnCapital = 0,
     minProbabilityOfProfit = 0,
     maxBreakevenMoveRatio = Infinity,
+    requireOtmShort = false,
+    requireTwoSidedQuotes = false,
+    maxLegSpreadToWidth = Infinity,
     riskFreeRate = 0.045,
     dividendYield = 0,
   } = params;
@@ -284,6 +295,7 @@ export function analyzeSpreads(params) {
 
   const legs = (def.legType === 'call' ? calls : puts)
     .filter(c => c.strike > 0 && (midPrice(c) > 0 || c.lastPrice > 0))
+    .filter(c => !requireTwoSidedQuotes || hasTwoSidedQuote(c))
     .filter(c => maxMoneynessDist === Infinity || Math.abs(c.strike - underlyingPrice) / underlyingPrice <= maxMoneynessDist)
     .sort((a, b) => a.strike - b.strike);
 
@@ -318,6 +330,33 @@ export function analyzeSpreads(params) {
 
       // Filter degenerate / arbitrage candidates
       if (maxProfitPerShare <= 0 || maxLossPerShare <= 0) continue;
+
+      if (requireOtmShort && def.flow === 'credit') {
+        const shortItm = def.legType === 'put'
+          ? shortLeg.strike >= underlyingPrice
+          : shortLeg.strike <= underlyingPrice;
+        if (shortItm) continue;
+      }
+
+      // Quote quality: when the combined bid/ask width of both legs is a large
+      // fraction of the strike width, the mid-price difference is noise and
+      // the spread cannot actually be filled near the quoted net cost.
+      const legSpreadSum = quoteWidth(lo) + quoteWidth(hi);
+      const legSpreadToWidth = legSpreadSum / width;
+      if (legSpreadToWidth > maxLegSpreadToWidth) continue;
+
+      // Natural (executable) price: buy at the ask, sell at the bid.
+      const naturalNetCost = hasTwoSidedQuote(lo) && hasTwoSidedQuote(hi)
+        ? (def.flow === 'debit'
+          ? longLeg.ask - shortLeg.bid
+          : -(shortLeg.bid - longLeg.ask))
+        : null;
+      // A debit spread whose natural cost ≥ width (or a credit spread whose
+      // natural credit ≤ 0) can never be profitable at executable prices.
+      if (requireTwoSidedQuotes && naturalNetCost != null) {
+        if (def.flow === 'debit' && naturalNetCost >= width) continue;
+        if (def.flow === 'credit' && naturalNetCost >= 0) continue;
+      }
 
       const maxProfit = maxProfitPerShare * 100;
       const maxLoss   = maxLossPerShare * 100;
@@ -359,6 +398,8 @@ export function analyzeSpreads(params) {
         width,
         netCost,
         netCostContract: netCost * 100,
+        naturalNetCost,
+        legSpreadToWidth,
         maxProfit,
         maxLoss,
         breakeven,
@@ -412,4 +453,4 @@ export function analyzeSpreads(params) {
 }
 
 // Re-exports for testing
-export const _internal = { normalCdf, probabilityCrosses, midPrice, STRATEGY_DEFS };
+export const _internal = { normalCdf, probabilityCrosses, midPrice, hasTwoSidedQuote, quoteWidth, STRATEGY_DEFS };

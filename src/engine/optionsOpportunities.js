@@ -12,9 +12,19 @@
  *   LEAPS:       DTE > 730   (> 2 years)
  *
  * Strategy selection (SPREAD-FIRST, low-cost, capital-efficient):
- *   Every recommendation is a DEFINED-RISK spread that must clear a hard
- *   return-on-capital floor (maxProfit >= 3x capital at risk) AND a minimum
- *   probability-of-profit guard. Naked long calls/puts are never recommended.
+ *   Every recommendation is a DEFINED-RISK spread. Naked long calls/puts are
+ *   never recommended. Gates differ by cash-flow because the payoff shapes do:
+ *     - DEBIT spreads (bull call / bear put / PMCC): maxProfit >= 3x capital
+ *       at risk AND PoP >= 30%.
+ *     - CREDIT spreads (bull put / bear call): the short strike MUST be
+ *       out-of-the-money, credit >= 20% of width (RoC >= 0.25) AND PoP >= 55%.
+ *       A credit spread that clears a 3x RoC floor is necessarily deep ITM —
+ *       i.e. a directional bet mislabeled as "income" — so the debit gate is
+ *       never applied to credit structures.
+ *   Quote-quality gate (all structures): both legs need a live two-sided
+ *   quote, combined leg bid/ask width <= 35% of strike width, and the natural
+ *   (ask/bid) price must still leave a profit. This rejects phantom spreads
+ *   priced off stale or very wide LEAPS quotes.
  *   Short & Medium: signal-driven, IV-aware
  *     - Bullish  → bull call debit spread (low IV) / bull put credit (high IV)
  *     - Bearish  → bear put debit spread (low IV) / bear call credit (high IV)
@@ -50,6 +60,16 @@ const DRAWDOWN_GUARD_PCT = 15; // flag if maxLoss > 15% of allocation
 const MIN_RETURN_ON_CAPITAL = 3.0; // maxProfit must be >= 3x capital at risk
 const MIN_POP = 0.30;              // reject the lowest-probability lottery tickets
 const HIGH_IV_THRESHOLD = 0.40;    // avg chain IV above this favors credit structures
+
+// Credit (income) spread gates — see header. 20% credit-to-width is the
+// conventional floor for OTM verticals; below it, commissions and a single
+// adverse move dominate the trade.
+const MIN_CREDIT_RETURN_ON_CAPITAL = 0.25; // credit / (width − credit) ⇔ credit ≥ 20% of width
+const MIN_CREDIT_POP = 0.55;
+
+// Quote-quality gate shared by every structure.
+const QUOTE_GATES = { requireTwoSidedQuotes: true, maxLegSpreadToWidth: 0.35 };
+const MAX_LEG_QUOTE_SPREAD_PCT = 0.15; // single-leg (PMCC) max (ask−bid)/mid
 
 // LEAPS bull call spreads prefer wide, stock-replacement-style spreads. We
 // start by requiring a 100-point minimum width and step down gradually if no
@@ -227,10 +247,18 @@ function contractMid(c) {
   return c.lastPrice || 0;
 }
 
+/** True when a contract has a live, reasonably tight two-sided quote. */
+function hasTradeableQuote(c) {
+  if (!(c.bid > 0 && c.ask > 0 && c.ask >= c.bid)) return false;
+  const mid = (c.bid + c.ask) / 2;
+  return (c.ask - c.bid) / mid <= MAX_LEG_QUOTE_SPREAD_PCT;
+}
+
 /** Pick the call from a list whose BS delta is closest to a target. */
 function pickCallByDelta(calls, spot, dte, targetDelta) {
   let best = null;
   for (const c of calls) {
+    if (!hasTradeableQuote(c)) continue;
     const mid = contractMid(c);
     if (mid <= 0 || !(c.strike > 0)) continue;
     const delta = estimateDelta(c, spot, dte, true) ?? 0;
@@ -367,6 +395,7 @@ function buildDebitSpread(asset, chain, band, direction) {
         maxMoneynessDist,
         minReturnOnCapital: MIN_RETURN_ON_CAPITAL,
         minProbabilityOfProfit: MIN_POP,
+        ...QUOTE_GATES,
       });
       if (candidates.length > 0) {
         appliedMinWidth = stepMin;
@@ -386,6 +415,7 @@ function buildDebitSpread(asset, chain, band, direction) {
       maxMoneynessDist,
       minReturnOnCapital: MIN_RETURN_ON_CAPITAL,
       minProbabilityOfProfit: MIN_POP,
+      ...QUOTE_GATES,
     });
   }
 
@@ -415,6 +445,7 @@ function buildDebitSpread(asset, chain, band, direction) {
     ],
     underlyingPrice,
     netCost: best.netCostContract,
+    naturalCost: best.naturalNetCost != null ? best.naturalNetCost * 100 : null,
     maxProfit: best.maxProfit,
     maxLoss: best.maxLoss,
     breakeven: best.breakeven,
@@ -458,14 +489,18 @@ function buildIncomeSpread(asset, chain, band, direction) {
     minLiquidity: 20,
     maxWidth: scaledMaxWidth,
     maxMoneynessDist,
-    minReturnOnCapital: MIN_RETURN_ON_CAPITAL,
-    minProbabilityOfProfit: MIN_POP,
+    requireOtmShort: true,
+    minReturnOnCapital: MIN_CREDIT_RETURN_ON_CAPITAL,
+    minProbabilityOfProfit: MIN_CREDIT_POP,
+    ...QUOTE_GATES,
   });
 
   if (candidates.length === 0) return null;
   const best = candidates[0];
 
   const incomeDirection = spreadType === 'bull_put' ? 'bullish' : 'bearish';
+  const credit = Math.abs(best.netCost);
+  const otmPct = Math.abs(best.shortLeg.strike - underlyingPrice) / underlyingPrice;
 
   return {
     symbol: asset.symbol,
@@ -480,6 +515,7 @@ function buildIncomeSpread(asset, chain, band, direction) {
     ],
     underlyingPrice,
     netCost: best.netCostContract, // negative = credit received
+    naturalCost: best.naturalNetCost != null ? best.naturalNetCost * 100 : null,
     maxProfit: best.maxProfit,
     maxLoss: best.maxLoss,
     breakeven: best.breakeven,
@@ -492,9 +528,9 @@ function buildIncomeSpread(asset, chain, band, direction) {
     drawdownFlag: false,
     why: {
       signalSummary: buildSignalSummary(asset, incomeDirection) + ' (income play)',
-      strikeReason: `${best.longLeg.strike}/${best.shortLeg.strike} credit spread — width $${best.width}, credit $${Math.abs(best.netCost).toFixed(2)}`,
-      horizonReason: buildHorizonReason(asset, band, incomeDirection) + ' Income spreads benefit from theta decay.',
-      riskNote: `Max loss $${best.maxLoss.toFixed(0)}, max profit $${best.maxProfit.toFixed(0)}, R/R ${best.riskReward.toFixed(2)}, PoP ${best.probabilityOfProfit != null ? (best.probabilityOfProfit * 100).toFixed(0) + '%' : 'N/A'}`,
+      strikeReason: `Sell $${best.shortLeg.strike} / buy $${best.longLeg.strike} ${spreadType === 'bull_put' ? 'puts' : 'calls'} — short strike ${(otmPct * 100).toFixed(1)}% out-of-the-money (${spreadType === 'bull_put' ? 'below' : 'above'} spot $${underlyingPrice.toFixed(2)}), credit $${credit.toFixed(2)} = ${((credit / best.width) * 100).toFixed(0)}% of the $${best.width} width`,
+      horizonReason: buildHorizonReason(asset, band, incomeDirection) + ' Income spreads benefit from theta decay; profit if the underlying stays on the right side of the short strike.',
+      riskNote: `Max loss $${best.maxLoss.toFixed(0)}, max profit $${best.maxProfit.toFixed(0)} (${(best.returnOnCapital * 100).toFixed(0)}% on risk), PoP ${best.probabilityOfProfit != null ? (best.probabilityOfProfit * 100).toFixed(0) + '%' : 'N/A'}. Income trades win often but lose more per loss — size small.`,
     },
   };
 }
@@ -691,6 +727,58 @@ function selectStrategy(asset, chain, band, heldSet, shortChain) {
   return rec;
 }
 
+// ─── Crash-regime overlay ────────────────────────────────
+
+// Score multipliers keyed by Crash Radar level. Directional bullish exposure
+// is de-rated as systemic risk rises; bearish setups get a modest lift.
+// Calm/watch leave rankings untouched so the overlay only bites when the
+// composite risk model (crashIndicator.js) actually flags stress.
+const REGIME_MULTIPLIERS = {
+  calm:     { bullish: 1.00, bearish: 1.00 },
+  watch:    { bullish: 1.00, bearish: 1.00 },
+  elevated: { bullish: 0.85, bearish: 1.10 },
+  high:     { bullish: 0.70, bearish: 1.20 },
+  severe:   { bullish: 0.50, bearish: 1.25 },
+};
+
+/**
+ * Summarize the crash regime for the UI and return per-direction multipliers.
+ * @param {{score:number, level:string, label?:string}|null} crashRisk
+ */
+function buildRegime(crashRisk) {
+  if (!crashRisk || crashRisk.score == null || !REGIME_MULTIPLIERS[crashRisk.level]) return null;
+  const { score, level } = crashRisk;
+  const label = crashRisk.label || level;
+  const stressed = ['elevated', 'high', 'severe'].includes(level);
+  let note;
+  if (stressed) {
+    note = `Crash Radar ${label} (${score.toFixed(0)}/100): bullish setups are de-rated ×${REGIME_MULTIPLIERS[level].bullish.toFixed(2)} and bearish setups lifted. Consider pairing any new long exposure with a hedge.`;
+  } else if (level === 'watch') {
+    note = `Crash Radar Watch (${score.toFixed(0)}/100): rankings unchanged, but review hedges before adding leverage.`;
+  } else {
+    note = `Crash Radar Calm (${score.toFixed(0)}/100): no regime adjustment applied.`;
+  }
+  return {
+    score,
+    level,
+    label,
+    stressed,
+    multipliers: REGIME_MULTIPLIERS[level],
+    note,
+    hedgeHint: 'See the Crash Thesis tab for volatility calendars, put diagonals, and a kill-switch hedge.',
+  };
+}
+
+function applyRegime(rec, regime) {
+  if (!regime) return rec;
+  const mult = regime.multipliers[rec.direction] ?? 1;
+  if (mult !== 1) {
+    rec.opportunityScore = Math.max(0, Math.min(100, rec.opportunityScore * mult));
+    rec.regimeNote = `${rec.direction === 'bullish' ? 'De-rated' : 'Boosted'} ×${mult.toFixed(2)} for Crash Radar ${regime.label}.`;
+  }
+  return rec;
+}
+
 // ─── Main entry point ────────────────────────────────────
 
 /**
@@ -702,10 +790,12 @@ function selectStrategy(asset, chain, band, heldSet, shortChain) {
  * @param {Map<string, Map<string, object>>} [params.chainsByBand] — chains keyed by symbol→band→chain
  * @param {Set<string>} [params.heldSet] — symbols the user holds
  * @param {number} [params.allocationPerTrade] — $ allocated per trade (for drawdown guard)
- * @returns {{ bands: object[], asOf: string }}
+ * @param {{score:number, level:string, label?:string}} [params.crashRisk] — Crash Radar result; de-rates bullish picks in stressed regimes
+ * @returns {{ bands: object[], regime: object|null, asOf: string }}
  */
 export function buildOptionsOpportunities(params = {}) {
-  const { universe = [], chains = new Map(), chainsByBand, heldSet, allocationPerTrade = 10000 } = params;
+  const { universe = [], chains = new Map(), chainsByBand, heldSet, allocationPerTrade = 10000, crashRisk = null } = params;
+  const regime = buildRegime(crashRisk);
 
   // Analyze each asset's momentum
   const analyzed = universe.map((a) => {
@@ -749,6 +839,7 @@ export function buildOptionsOpportunities(params = {}) {
 
       const rec = selectStrategy(asset, chain, bandKey, heldSet, shortChain);
       if (rec) {
+        applyRegime(rec, regime);
         // Drawdown guard check
         if (allocationPerTrade > 0 && rec.maxLoss > 0) {
           const lossPct = (rec.maxLoss / allocationPerTrade) * 100;
@@ -778,6 +869,7 @@ export function buildOptionsOpportunities(params = {}) {
       { band: 'medium', ...BANDS.medium, recommendations: bandResults.medium || [] },
       { band: 'leaps', ...BANDS.leaps, recommendations: bandResults.leaps || [] },
     ],
+    regime,
     asOf: new Date().toISOString(),
   };
 }
@@ -794,7 +886,12 @@ export const _internal = {
   avgChainIV,
   pickCallByDelta,
   estimateDelta,
+  hasTradeableQuote,
+  buildRegime,
+  REGIME_MULTIPLIERS,
   MIN_RETURN_ON_CAPITAL,
   MIN_POP,
+  MIN_CREDIT_RETURN_ON_CAPITAL,
+  MIN_CREDIT_POP,
   HIGH_IV_THRESHOLD,
 };

@@ -114,7 +114,7 @@ function TermStructureCard({ ts }) {
           <BarChart3 size={16} className="text-brand-400" />
           <h3 className="text-sm font-bold">VIX Term Structure</h3>
         </div>
-        <p className="text-xs text-surface-500">Futures data unavailable.</p>
+        <p className="text-xs text-surface-500">VIX curve data unavailable.</p>
       </Card>
     );
   }
@@ -122,27 +122,35 @@ function TermStructureCard({ ts }) {
   const isContango = ts.contango;
   const isBackwardation = ts.backwardation;
   const accent = isBackwardation ? 'text-red-400' : isContango ? 'text-emerald-400' : 'text-surface-400';
+  const isIndexCurve = ts.source === 'cboe-index';
+  const points = isIndexCurve
+    ? [
+        { label: 'VIX9D', value: ts.vix9d, cls: 'text-surface-300' },
+        { label: 'VIX (30d)', value: ts.vix, cls: 'text-surface-200' },
+        { label: 'VIX3M', value: ts.vix3m, cls: accent },
+        { label: 'VIX6M', value: ts.vix6m, cls: 'text-surface-300' },
+      ]
+    : [
+        { label: 'VIX (Spot)', value: ts.vix, cls: 'text-surface-200' },
+        { label: 'VX1 (Front)', value: ts.vx1, cls: accent },
+        { label: 'VX2 (2nd)', value: ts.vx2, cls: 'text-surface-300' },
+      ];
 
   return (
     <Card>
       <div className="flex items-center gap-2 mb-4">
         <BarChart3 size={16} className="text-brand-400" />
         <h3 className="text-sm font-bold">VIX Term Structure</h3>
+        {isIndexCurve && <span className="text-[10px] text-surface-500">CBOE constant-maturity indices</span>}
       </div>
 
       <div className="flex items-end justify-between gap-2 mb-4">
-        <div className="text-center flex-1">
-          <p className="text-[10px] text-surface-500 mb-1">VIX (Spot)</p>
-          <p className="text-xl font-bold text-surface-200">{fmt(ts.vix)}</p>
-        </div>
-        <div className="text-center flex-1">
-          <p className="text-[10px] text-surface-500 mb-1">VX1 (Front)</p>
-          <p className={`text-xl font-bold ${accent}`}>{fmt(ts.vx1)}</p>
-        </div>
-        <div className="text-center flex-1">
-          <p className="text-[10px] text-surface-500 mb-1">VX2 (2nd)</p>
-          <p className="text-xl font-bold text-surface-300">{fmt(ts.vx2)}</p>
-        </div>
+        {points.map((pt) => (
+          <div key={pt.label} className="text-center flex-1">
+            <p className="text-[10px] text-surface-500 mb-1">{pt.label}</p>
+            <p className={`text-xl font-bold ${pt.cls}`}>{fmt(pt.value)}</p>
+          </div>
+        ))}
       </div>
 
       <div className={`flex items-center gap-2 px-3 py-2 rounded-lg ${isBackwardation ? 'bg-red-500/10' : isContango ? 'bg-emerald-500/10' : 'bg-surface-800/40'}`}>
@@ -152,21 +160,25 @@ function TermStructureCard({ ts }) {
 
       <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
         <div className="flex justify-between">
-          <span className="text-surface-500">Spread (VX1-VIX)</span>
+          <span className="text-surface-500">{isIndexCurve ? 'Spread (VIX3M−VIX)' : 'Spread (VX1−VIX)'}</span>
           <span className={accent}>{fmtPct(ts.spread)}</span>
         </div>
         <div className="flex justify-between">
-          <span className="text-surface-500">Slope</span>
-          <span className="text-surface-300">{ts.slope != null ? fmt(ts.slope * 100, 1) + '%' : '—'}</span>
+          <span className="text-surface-500">{isIndexCurve ? 'VIX / VIX3M' : 'Slope'}</span>
+          <span className="text-surface-300">
+            {isIndexCurve
+              ? fmt(ts.ratio, 2)
+              : ts.slope != null ? fmt(ts.slope * 100, 1) + '%' : '—'}
+          </span>
         </div>
       </div>
 
       <p className="mt-3 text-[11px] text-surface-600 leading-relaxed">
         {isBackwardation
-          ? 'Backwardation: front-month futures trade below spot VIX. Hedging demand is elevated — often a stress or capitulation signal.'
+          ? `Backwardation: the ${isIndexCurve ? '3-month VIX trades below spot VIX (ratio > 1)' : 'front-month future trades below spot VIX'}. Hedging demand is elevated — often a stress or capitulation signal.`
           : isContango
-            ? 'Contango: front-month futures trade above spot VIX. Normal state — the market expects vol to drift higher over time (roll yield for short-vol strategies).'
-            : 'Flat: futures are roughly in line with spot VIX.'}
+            ? `Contango: the ${isIndexCurve ? '3-month VIX is above spot VIX (ratio < 1)' : 'front-month future is above spot VIX'}. Normal state — the market expects vol to drift higher over time; long-dated vega costs more than spot VIX suggests.`
+            : 'Flat: the curve is roughly in line with spot VIX.'}
       </p>
     </Card>
   );
@@ -393,10 +405,10 @@ export default function VolatilityTab() {
       {/* Footer */}
       {scan && !loading && (
         <p className="text-[11px] text-surface-600 leading-relaxed">
-          Source: Yahoo Finance (^VIX, SPY, ^VX1, ^VX2 daily closes, ~6 months) ·
+          Source: Yahoo Finance (^VIX, ^VIX9D, ^VIX3M, ^VIX6M, SPY daily closes, ~6 months) ·
           Realized vol = std of daily log returns × √252 × 100 ·
           Vol risk premium = VIX − SPY realized vol (high → options expensive, sell vol; low → cheap, buy vol) ·
-          Term structure: contango (VX1 &gt; VIX) = normal; backwardation (VX1 &lt; VIX) = stress ·
+          Term structure: contango (VIX3M &gt; VIX) = normal; backwardation (VIX3M &lt; VIX) = stress ·
           Educational only — not financial advice. Volatility trading involves significant risk.
         </p>
       )}

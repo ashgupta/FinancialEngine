@@ -38,7 +38,7 @@ export async function buildMarketContext(watchlistSymbols = []) {
   const [
     indicesMap, watchlistMap, futuresData, marketSnap,
     cotReport, cotHistory, momentumScan, sectorScan, volatilityScan,
-    crashScan,
+    crashScan, crashThesis,
   ] = await Promise.all([
     // 1. Global indices
     fetchQuotes(GLOBAL_INDICES.map(idx => idx.symbol)).catch(() => new Map()),
@@ -60,6 +60,8 @@ export async function buildMarketContext(watchlistSymbols = []) {
     safeFetch('/volatility/scan'),
     // 10. Crash indicator scan
     safeFetch('/crash/scan'),
+    // 11. Crash thesis (Cem Karsan playbook)
+    safeFetch('/thesis/karsan'),
   ]);
 
   // 10. Social data for watchlist (separate since it's per-symbol)
@@ -233,7 +235,11 @@ export async function buildMarketContext(watchlistSymbols = []) {
     let text = '--- VOLATILITY ANALYSIS ---\n';
     text += `VIX: ${volatilityScan.vixLevel?.toFixed(2)} | Regime: ${volatilityScan.volRegime} | Signal: ${volatilityScan.signal}\n`;
     text += `SPY Realized Vol: ${volatilityScan.realizedVolSPY?.toFixed(2)}% | Vol Risk Premium: ${volatilityScan.volRiskPremium?.toFixed(2)}\n`;
-    if (volatilityScan.termStructure) text += `Term Structure: ${volatilityScan.termStructure}\n`;
+    const ts = volatilityScan.termStructure;
+    if (ts) {
+      const fwd = ts.vix3m != null ? `VIX3M ${ts.vix3m.toFixed(2)}` : ts.vx1 != null ? `VX1 ${ts.vx1.toFixed(2)}` : 'forward n/a';
+      text += `Term Structure: ${ts.label} (VIX ${ts.vix?.toFixed(2)} vs ${fwd}${ts.vix6m != null ? `, VIX6M ${ts.vix6m.toFixed(2)}` : ''})\n`;
+    }
     text += `Vol of Vol: ${volatilityScan.volOfVol?.toFixed(1)}\n`;
     if (volatilityScan.description) text += `Summary: ${volatilityScan.description}\n`;
     contextParts.push(text);
@@ -252,6 +258,24 @@ export async function buildMarketContext(watchlistSymbols = []) {
     }
     contextParts.push(text);
     dataSources.push('Crash Risk');
+  }
+
+  // 10b. Crash Thesis (Cem Karsan drawdown / V-bottom playbook)
+  if (crashThesis && crashThesis.phase) {
+    let text = '--- CRASH THESIS (Cem Karsan: 20-40% drawdown after midterms, underway before end of March, then V-bottom) ---\n';
+    text += `${crashThesis.headline}\n`;
+    text += `Phase: ${crashThesis.phase.label} | Days to midterms: ${crashThesis.phase.daysToMidterms} | Days to kill switch (${crashThesis.thesis?.killSwitchDate}): ${crashThesis.phase.daysToKillSwitch}\n`;
+    (crashThesis.scorecard?.checks || []).forEach((c) => {
+      text += `  [${c.status}] ${c.label}: ${c.detail}\n`;
+    });
+    (crashThesis.trades || []).forEach((t) => {
+      const legs = t.legs.map((l) => `${l.action} ${l.strike}P ${l.expiryLabel} @${l.mid}`).join(' / ');
+      text += `  Trade ${t.name}: ${legs} | cost $${t.costPerContract}/contract | P&L at -20%: $${t.pnlAtMinus20}, flat: $${t.pnlFlat}\n`;
+    });
+    if (crashThesis.vBottom) text += `V-bottom plan status: ${crashThesis.vBottom.status}\n`;
+    if (crashThesis.debasement) text += `Debasement: ${crashThesis.debasement.verdict}\n`;
+    contextParts.push(text);
+    dataSources.push('Crash Thesis');
   }
 
   // 11. Social Sentiment
@@ -285,6 +309,6 @@ export function getAvailableDataSources() {
   return [
     'Global Indices', 'Watchlist', 'Futures', 'World Markets',
     'COT Report', 'COT History', 'Momentum', 'Sector Rotation',
-    'Volatility', 'Crash Risk', 'Social Sentiment',
+    'Volatility', 'Crash Risk', 'Crash Thesis', 'Social Sentiment',
   ];
 }

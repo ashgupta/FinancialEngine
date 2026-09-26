@@ -1,9 +1,60 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: 1.10.0 → 1.11.0
-Ratification: 2026-05-09 (original); amended 2026-05-09 (v1.1.0); amended 2026-05-09 (v1.2.0); amended 2026-07-04 (v1.3.0); amended 2026-07-04 (v1.4.0); amended 2026-07-04 (v1.4.1); amended 2026-07-04 (v1.5.0); amended 2026-07-11 (v1.6.0); amended 2026-07-11 (v1.7.0); amended 2026-07-11 (v1.8.0); amended 2026-07-11 (v1.9.0); amended 2026-07-11 (v1.10.0)
-Bump rationale: MINOR — extends Principle XIV (Risk & Opportunity
+Version change: 1.11.0 → 1.12.0
+Ratification: 2026-05-09 (original); amended 2026-05-09 (v1.1.0); amended 2026-05-09 (v1.2.0); amended 2026-07-04 (v1.3.0); amended 2026-07-04 (v1.4.0); amended 2026-07-04 (v1.4.1); amended 2026-07-04 (v1.5.0); amended 2026-07-11 (v1.6.0); amended 2026-07-11 (v1.7.0); amended 2026-07-11 (v1.8.0); amended 2026-07-11 (v1.9.0); amended 2026-07-11 (v1.10.0); amended 2026-07-12 (v1.11.0); amended 2026-09-26 (v1.12.0)
+Bump rationale: MINOR — extends Principle XIV with (1) cash-flow-specific
+gates for options recommendations (credit spreads must be OTM; the 3×
+RoC floor applies to debit structures only), (2) a quote-quality gate
+rejecting phantom spreads priced off wide/stale quotes, (3) a Crash
+Radar regime overlay on Options Opportunities, (4) a Crash Thesis
+(Cem Karsan) engine + tab, and (5) the CBOE VIX index curve as the
+term-structure source.
+
+Change since 1.11.0:
+  Principles modified:
+    XIV. Risk & Opportunity Intelligence — new sub-sections: cash-flow
+    gates, quote-quality gate, crash-regime overlay, Crash Thesis, VIX
+    term structure source
+  Files added:
+    ⚠ src/engine/crashThesis.js               — pure engine (phase,
+       scorecard, IV term structure, 4 structures, scenario P&L,
+       portfolio impact, V-bottom plan, debasement panel)
+    ⚠ src/components/CrashThesisTab.jsx       — new tab
+    ⚠ tests/engine/crashThesis.test.js        — 37 tests
+    ⚠ tests/engine/optionsOpportunitiesFixes.test.js — 18 tests
+    ⚠ tests/engine/vixCurve.test.js           — 10 tests
+  Files modified:
+    ⚠ src/engine/spreadAnalyzer.js            — requireOtmShort,
+       requireTwoSidedQuotes, maxLegSpreadToWidth, naturalNetCost
+    ⚠ src/engine/optionsOpportunities.js      — credit gates, quote
+       gate, PMCC quote check, regime overlay
+    ⚠ src/engine/volatilityEngine.js          — computeVixIndexCurve
+    ⚠ src/engine/crashIndicator.js            — VIX3M fallback
+    ⚠ src/engine/briefingContext.js           — term-structure text
+       fix ([object Object]); Crash Thesis context section
+    ⚠ server.js                               — ^VIX9D/^VIX3M/^VIX6M;
+       shared getCrashScan(); regime → /options/opportunities;
+       GET /thesis/karsan
+    ⚠ tests/engine/optionsOpportunitiesRoc.test.js — RoC assertion
+       updated for the deliberate credit-spread spec change
+    ⚠ SpreadFinderTab / OptionsOpportunitiesTab / VolatilityTab /
+       AIChatTab / App.jsx / vite.config.js     — UI + proxy wiring
+  Deferred TODOs resolved:
+    - TODO(OPTIONS-MULTI-EXPIRY-CHAIN) — server already fetches one
+      chain per band (resolved before v1.12.0; noted here)
+  Deferred TODOs added:
+    - TODO(COT-NORMALIZATION): crash COT factor saturates at ±50k
+      contracts of weekly change; a single week can contribute the
+      majority of a calm-market score — normalize by open interest
+    - TODO(IBKR-AUTH): /ibkr/account/* endpoints are unauthenticated and
+      CORS allows any origin; restrict before exposing beyond localhost
+    - TODO(BUNDLE-SPLIT): 1.1 MB JS bundle — lazy-load heavy tabs
+    - TODO(SOCIAL-WATCHLIST-TEST): DEFAULT_SOCIAL_WATCHLIST has 8
+      entries but its test expects > 10 (pre-existing failure)
+
+----- previous rationale (v1.11.0) -----
+MINOR — extends Principle XIV (Risk & Opportunity
 Intelligence) with a LEAPS Stock-Replacement Analyzer: a pure engine
 that decomposes a deep-ITM LEAPS premium into intrinsic, interest
 carry, dividend drag, and volatility premium, back-solves implied
@@ -722,6 +773,46 @@ integration.
 - **Tests**: Vitest unit tests MUST verify band bucketing, ranking,
   strategy picks, rationale presence, drawdown guard, monotonicity,
   and null-safety.
+- **Cash-flow-specific gates** (v1.12.0): debit structures (bull call,
+  bear put, PMCC) MUST clear RoC ≥ 3× and PoP ≥ 30%. Credit structures
+  (bull put, bear call) MUST have an out-of-the-money short strike,
+  credit ≥ 20% of width (RoC ≥ 0.25) and PoP ≥ 55%. The debit RoC floor
+  MUST NOT be applied to credit spreads — doing so selects deep-ITM
+  directional bets and mislabels them as income.
+- **Quote-quality gate** (v1.12.0): every leg MUST have a live two-sided
+  quote; combined leg bid/ask width MUST be ≤ 35% of the strike width;
+  and the natural (buy-at-ask / sell-at-bid) price MUST still leave a
+  profit. Recommendations MUST expose the natural price alongside mid.
+- **Crash-regime overlay** (v1.12.0): the engine MUST accept the Crash
+  Radar result and, at Elevated/High/Severe, de-rate bullish scores and
+  lift bearish scores, returning a `regime` summary rendered as a banner.
+
+**Crash Thesis (strategist playbook) (v1.12.0):**
+
+- A pure engine (`src/engine/crashThesis.js`) MAY model a named
+  strategist's public market thesis (currently Cem Karsan's post-midterm
+  drawdown → V-bottom view) provided it: cites the source; injects
+  `asOf` for determinism; shows a live-data scorecard separating entry
+  conditions from confirmation signals; prices each structure from live
+  quotes that pass a quote-quality check; shows scenario P&L with
+  documented spot-vol assumptions; encodes the thesis's own exit rules
+  (kill switch, flip-long triggers); and reports hedged vs. unhedged
+  portfolio drawdown against the Principle VII 15% threshold.
+- A structure whose scenario P&L is negative in the crash the thesis
+  predicts (e.g., a same-strike calendar in a fast −20% move) MUST be
+  labeled as such in the UI.
+- Server endpoint `GET /thesis/karsan` MAY cache market inputs for 1 hour
+  (options quotes stale faster than daily scans) with `?refresh=1`
+  bypass; sizing parameters MUST be applied per request without refetch.
+- The tab MUST include `SectionTimestamp`, `WeeklyTrendView`, the source
+  link, and an educational disclaimer; the Market Assistant MUST receive
+  the thesis summary (Principle XIII).
+
+**VIX term structure source (v1.12.0):** Yahoo publishes no continuous
+VIX futures (`^VX1`/`^VX2` return no data). The term-structure factor
+MUST use real futures when available and otherwise the CBOE
+constant-maturity indices (`^VIX9D`, `^VIX3M`, `^VIX6M`), with VIX3M as
+the forward point.
 - **Rationale**: market risk and opportunity discovery are the two most
   valuable intelligence functions for an active investor. A transparent,
   multi-factor crash indicator provides early warning without black-box
@@ -847,4 +938,4 @@ tracking, and WeeklyTrendView required by Principle XV.
 - Runtime guidance for AI agents lives in `.windsurf/rules/` and `.windsurf/workflows/`;
   those documents MUST stay consistent with this constitution.
 
-**Version**: 1.11.0 | **Ratified**: 2026-05-09 | **Last Amended**: 2026-07-12
+**Version**: 1.12.0 | **Ratified**: 2026-05-09 | **Last Amended**: 2026-09-26

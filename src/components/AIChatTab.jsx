@@ -20,6 +20,7 @@ const SUGGESTED_QUESTIONS = [
   { icon: Newspaper, text: 'What is the social sentiment around my watchlist?', category: 'Social Sentiment' },
   { icon: Zap, text: 'Are there any volume spikes or breakout signals?', category: 'Momentum' },
   { icon: Radar, text: 'What is the current crash risk score and which factors are elevated?', category: 'Crash Risk' },
+  { icon: Radar, text: 'Is live data confirming Cem Karsan\'s post-midterm drawdown thesis, and which hedge structure fits best?', category: 'Crash Risk' },
   { icon: Target, text: 'What options opportunities look best across short-term and LEAPS?', category: 'Options' },
   { icon: TrendingDown, text: 'What are the biggest risks in the current market?', category: 'Volatility' },
   { icon: Database, text: 'What data sources do you have access to?', category: 'All' },

@@ -895,14 +895,17 @@ app.get('/volatility/scan', async (req, res) => {
       }
     };
 
-    const [vixHistory, spyHistory, vx1History, vx2History] = await Promise.all([
+    // Yahoo has no continuous VIX futures (^VX1/^VX2 return nothing); the
+    // CBOE constant-maturity indices give the same curve shape.
+    const [vixHistory, spyHistory, vix9d, vix3m, vix6m] = await Promise.all([
       fetchOne('^VIX'),
       fetchOne('SPY'),
-      fetchOne('^VX1'),
-      fetchOne('^VX2'),
+      fetchOne('^VIX9D'),
+      fetchOne('^VIX3M'),
+      fetchOne('^VIX6M'),
     ]);
 
-    const analysis = analyzeVolatility(vixHistory, spyHistory, vx1History, vx2History);
+    const analysis = analyzeVolatility(vixHistory, spyHistory, null, null, { vix9d, vix3m, vix6m });
 
     if (analysis.vixLevel == null) {
       if (volatilityCache) return res.json({ ...volatilityCache.data, cached: true, stale: true });
@@ -1086,12 +1089,21 @@ import { computeCrashIndicator } from './src/engine/crashIndicator.js';
 let crashCache = null;
 const CRASH_TTL = 24 * 60 * 60_000; // 24 hours
 
-app.get('/crash/scan', async (req, res) => {
-  try {
-    if (crashCache && crashCache.expiresAt > Date.now() && req.query.refresh !== '1') {
-      return res.json({ ...crashCache.data, cached: true });
-    }
+/**
+ * Shared crash-scan computation (used by /crash/scan, /options/opportunities
+ * and /thesis/karsan). Returns { data, cached }. Also returns the volatility
+ * analysis it computed so callers don't refetch it.
+ */
+async function getCrashScan({ refresh = false } = {}) {
+  if (crashCache && crashCache.expiresAt > Date.now() && !refresh) {
+    return { data: crashCache.data, volatility: crashCache.volatility, cached: true };
+  }
+  const { result, volatility } = await computeCrashScan();
+  crashCache = { data: result, volatility, expiresAt: Date.now() + CRASH_TTL };
+  return { data: result, volatility, cached: false };
+}
 
+async function computeCrashScan() {
     // Fetch all inputs in parallel (reuse the same yahooFinance instance)
     const period1 = new Date(Date.now() - 400 * 86400000); // ~13 months
 
@@ -1113,14 +1125,15 @@ app.get('/crash/scan', async (req, res) => {
       }
     };
 
-    // 1. Volatility data (VIX, SPY, VX1, VX2 histories)
-    const [vixHist, spyHist, vx1Hist, vx2Hist] = await Promise.all([
+    // 1. Volatility data (VIX, SPY + CBOE VIX9D/VIX3M/VIX6M curve)
+    const [vixHist, spyHist, vix9d, vix3m, vix6m] = await Promise.all([
       fetchHistory('^VIX'),
       fetchHistory('SPY'),
-      fetchHistory('^VX1'),
-      fetchHistory('^VX2'),
+      fetchHistory('^VIX9D'),
+      fetchHistory('^VIX3M'),
+      fetchHistory('^VIX6M'),
     ]);
-    const volatility = analyzeVolatility(vixHist, spyHist, vx1Hist, vx2Hist);
+    const volatility = analyzeVolatility(vixHist, spyHist, null, null, { vix9d, vix3m, vix6m });
 
     // 2. Momentum scan (reuse MOMENTUM_UNIVERSE + FACTOR_ETFS)
     const allAssets = [
@@ -1182,9 +1195,22 @@ app.get('/crash/scan', async (req, res) => {
       sectorScan,
       cotReport,
     });
+    // Expose SPY trend context for downstream consumers (crash thesis tab)
+    const spyTs = momentumScan?.assets?.find((a) => a.symbol === 'SPY')?.timeSeries;
+    if (spyTs) {
+      result.spy = {
+        last: spyTs.last ?? null,
+        sma200: spyTs.sma200 ?? null,
+        high52w: spyTs.range52w?.high52w ?? null,
+      };
+    }
+    return { result, volatility };
+}
 
-    crashCache = { data: result, expiresAt: Date.now() + CRASH_TTL };
-    res.json({ ...result, cached: false });
+app.get('/crash/scan', async (req, res) => {
+  try {
+    const { data, cached } = await getCrashScan({ refresh: req.query.refresh === '1' });
+    res.json({ ...data, cached });
   } catch (err) {
     console.error('Crash scan error:', err.message);
     if (crashCache) return res.json({ ...crashCache.data, cached: true, stale: true });
@@ -1358,6 +1384,14 @@ app.post('/options/opportunities', async (req, res) => {
       }
     }));
 
+    // Crash regime overlay (optional — degrade gracefully per Principle X)
+    let crashRisk = null;
+    try {
+      crashRisk = (await getCrashScan()).data;
+    } catch (err) {
+      console.error('Options opportunities: crash regime unavailable:', err?.message || String(err));
+    }
+
     // Build opportunities
     const result = buildOptionsOpportunities({
       universe: validAssets,
@@ -1365,6 +1399,7 @@ app.post('/options/opportunities', async (req, res) => {
       chainsByBand,
       heldSet,
       allocationPerTrade,
+      crashRisk,
     });
 
     optionsOppCache = { key: cacheKey, data: result, expiresAt: Date.now() + OPTIONS_OPP_TTL };
@@ -1372,6 +1407,115 @@ app.post('/options/opportunities', async (req, res) => {
   } catch (err) {
     console.error('Options opportunities error:', err.message);
     if (optionsOppCache) return res.json({ ...optionsOppCache.data, cached: true, stale: true });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Crash Thesis (Cem Karsan) endpoint ─────────────────
+// GET /thesis/karsan?portfolio=500000&budget=0.02&equity=0.8[&refresh=1]
+// Market inputs (crash scan, VIX curve, SPY chains for the thesis expiries,
+// GLD/FXF/UUP trends) are cached for 1 hour — options quotes go stale faster
+// than the 24h cadence used for daily scans. Sizing params are applied per
+// request by the pure engine, so changing them never refetches data.
+import { buildCrashThesis, KARSAN_THESIS, pickExpiry as pickThesisExpiry } from './src/engine/crashThesis.js';
+import { analyzeAsset } from './src/engine/momentumEngine.js';
+
+let thesisMarketCache = null;
+const THESIS_TTL = 60 * 60_000; // 1 hour
+const DEBASEMENT_ASSETS = [
+  { symbol: 'GLD', name: 'SPDR Gold Shares', role: 'Gold' },
+  { symbol: 'FXF', name: 'Invesco CurrencyShares Swiss Franc', role: 'Swiss franc' },
+  { symbol: 'UUP', name: 'Invesco DB US Dollar Index Bullish', role: 'US dollar (should weaken)', inverse: true },
+];
+
+async function fetchThesisMarketInputs(refresh) {
+  const { data: crash, volatility } = await getCrashScan({ refresh });
+
+  // SPY chains for the expiries the thesis needs
+  const base = await yahooFinance.options('SPY', {}, { validateResult: false });
+  const expirations = (base.expirationDates || []).map((d) => Math.floor(new Date(d).getTime() / 1000));
+  const day = 86400000;
+  const now = Date.now();
+  const mid = Date.parse(`${KARSAN_THESIS.midtermDate}T00:00:00Z`);
+  const kill = Date.parse(`${KARSAN_THESIS.killSwitchDate}T00:00:00Z`);
+  const vega = Date.parse(`${KARSAN_THESIS.vegaTargetDate}T00:00:00Z`);
+  const targets = [now + 30 * day, mid + 17 * day, mid + 45 * day, kill - 12 * day, vega];
+  const wanted = [...new Set(targets.map((t) => pickThesisExpiry(expirations, t, { minMs: now + 7 * day })).filter(Boolean))];
+
+  const toContract = (c) => ({
+    strike: c.strike,
+    bid: c.bid ?? 0,
+    ask: c.ask ?? 0,
+    lastPrice: c.lastPrice ?? 0,
+    impliedVolatility: c.impliedVolatility ?? 0,
+    openInterest: c.openInterest ?? 0,
+    volume: c.volume ?? 0,
+  });
+  const chains = (await Promise.all(wanted.map(async (exp) => {
+    try {
+      const r = await yahooFinance.options('SPY', { date: new Date(exp * 1000) }, { validateResult: false });
+      const o = r.options?.[0];
+      if (!o) return null;
+      return {
+        expirationDate: Math.floor(new Date(o.expirationDate).getTime() / 1000),
+        underlyingPrice: r.quote?.regularMarketPrice ?? 0,
+        puts: (o.puts || []).map(toContract),
+        calls: [],
+      };
+    } catch (err) {
+      console.error(`Thesis chain fetch SPY@${exp} error:`, err?.message || String(err));
+      return null;
+    }
+  }))).filter(Boolean);
+
+  // Debasement trend inputs
+  const period1 = new Date(now - 400 * day);
+  const debasementAssets = await Promise.all(DEBASEMENT_ASSETS.map(async (a) => {
+    try {
+      const r = await yahooFinance.chart(a.symbol, { period1, interval: '1d' }, { validateResult: false });
+      const q = (r.quotes || []).filter((x) => x.close != null);
+      const history = {
+        closes: q.map((x) => x.close), highs: q.map((x) => x.high),
+        lows: q.map((x) => x.low), volumes: q.map((x) => x.volume),
+      };
+      return { ...a, analysis: analyzeAsset(history, a) };
+    } catch {
+      return { ...a, analysis: null };
+    }
+  }));
+
+  return { crash, volatility, chains, debasementAssets, fetchedAt: new Date().toISOString() };
+}
+
+app.get('/thesis/karsan', async (req, res) => {
+  const num = (v, d) => (v != null && v !== '' && Number.isFinite(+v) ? +v : d);
+  try {
+    const refresh = req.query.refresh === '1';
+    if (!thesisMarketCache || thesisMarketCache.expiresAt <= Date.now() || refresh) {
+      const inputs = await fetchThesisMarketInputs(refresh);
+      thesisMarketCache = { inputs, expiresAt: Date.now() + THESIS_TTL, cached: false };
+    } else {
+      thesisMarketCache.cached = true;
+    }
+    const { inputs } = thesisMarketCache;
+    const result = buildCrashThesis({
+      asOf: Date.now(),
+      crash: inputs.crash,
+      volatility: inputs.volatility,
+      chains: inputs.chains,
+      debasementAssets: inputs.debasementAssets,
+      portfolioValue: num(req.query.portfolio, 500000),
+      hedgeBudgetPct: num(req.query.budget, 0.02),
+      equityExposurePct: num(req.query.equity, 0.8),
+    });
+    res.json({
+      ...result,
+      fetchedAt: inputs.fetchedAt,
+      cached: thesisMarketCache.cached,
+      source: 'Yahoo Finance (SPY options, ^VIX/^VIX3M curve, GLD/FXF/UUP) + CFTC COT via Crash Radar',
+    });
+  } catch (err) {
+    console.error('Crash thesis error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

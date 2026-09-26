@@ -72,6 +72,7 @@ export default function SpreadFinderTab() {
   const [minLiquidity, setMinLiquidity] = useState(10);
   const [sortBy, setSortBy] = useState('composite');
   const [dividendYield, setDividendYield] = useState(0);
+  const [tradeableOnly, setTradeableOnly] = useState(true);
   const [lastRefresh, setLastRefresh] = useState(null);
 
   // ── Load chain on symbol/expiry change ──────────────────
@@ -119,8 +120,11 @@ export default function SpreadFinderTab() {
       maxWidth,
       minLiquidity,
       dividendYield: dividendYield / 100,   // user enters 2.5 → 0.025
+      // Quote-quality gate: drop stale/one-sided legs and spreads whose leg
+      // bid/ask widths swamp the strike width (phantom mid-price spreads).
+      ...(tradeableOnly ? { requireTwoSidedQuotes: true, maxLegSpreadToWidth: 0.35 } : {}),
     });
-  }, [chain, daysToExpiry, spreadType, maxRisk, maxWidth, minLiquidity, dividendYield]);
+  }, [chain, daysToExpiry, spreadType, maxRisk, maxWidth, minLiquidity, dividendYield, tradeableOnly]);
 
   // ── Re-sort by user choice ──────────────────────────────
   const sortedCandidates = useMemo(() => {
@@ -393,6 +397,18 @@ export default function SpreadFinderTab() {
                 className="w-full accent-cyan-500"
               />
               <div className="text-[10px] text-gray-500 mt-0.5">volume + open interest, per leg</div>
+              <label className="mt-3 flex items-start gap-2 text-xs text-gray-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={tradeableOnly}
+                  onChange={(e) => setTradeableOnly(e.target.checked)}
+                  className="mt-0.5 accent-cyan-500"
+                />
+                <span>
+                  Tradeable quotes only
+                  <span className="block text-[10px] text-gray-500">live bid &amp; ask on both legs; combined leg bid/ask ≤ 35% of strike width</span>
+                </span>
+              </label>
             </div>
           </div>
         </div>

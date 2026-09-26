@@ -277,10 +277,15 @@ describe('selectStrategy spread-first (no naked longs)', () => {
     chains.set('AAPL', makeChain(200, D(60), 0.25));
 
     const result = buildOptionsOpportunities({ universe, chains });
+    // Spec change (constitution v1.12.0): the 3× RoC floor applies to DEBIT
+    // structures only. Credit spreads use their own OTM + 20%-of-width gate.
+    const { MIN_CREDIT_RETURN_ON_CAPITAL } = ooInternal;
     for (const band of result.bands) {
       for (const rec of band.recommendations) {
         expect(rec).toHaveProperty('returnOnCapital');
-        if (rec.strategyType !== 'pmcc') {
+        if (rec.strategyType === 'bull_put' || rec.strategyType === 'bear_call') {
+          expect(rec.returnOnCapital).toBeGreaterThanOrEqual(MIN_CREDIT_RETURN_ON_CAPITAL);
+        } else if (rec.strategyType !== 'pmcc') {
           expect(rec.returnOnCapital).toBeGreaterThanOrEqual(MIN_RETURN_ON_CAPITAL);
         }
       }

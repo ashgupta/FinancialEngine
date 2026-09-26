@@ -39,6 +39,20 @@ function fmtMoney(v) {
   return `$${v.toFixed(0)}`;
 }
 
+/** Signed net cost: debits as "$X", credits as "+$X cr". */
+function fmtNetCost(v) {
+  if (v == null || isNaN(v)) return '—';
+  return v < 0 ? `+$${Math.abs(v).toFixed(0)} cr` : `$${v.toFixed(0)}`;
+}
+
+const REGIME_STYLES = {
+  calm: 'border-emerald-500/30 bg-emerald-500/5 text-emerald-300',
+  watch: 'border-blue-500/30 bg-blue-500/5 text-blue-300',
+  elevated: 'border-yellow-500/30 bg-yellow-500/5 text-yellow-300',
+  high: 'border-orange-500/30 bg-orange-500/5 text-orange-300',
+  severe: 'border-red-500/30 bg-red-500/5 text-red-300',
+};
+
 function fmtPct(v) {
   if (v == null || isNaN(v)) return '—';
   return `${(v * 100).toFixed(0)}%`;
@@ -99,8 +113,13 @@ function RecCard({ rec, rank }) {
       {/* Key metrics */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3 text-[11px]">
         <div>
-          <div className="text-surface-500">Cost</div>
-          <div className="text-surface-200 font-medium">{fmtMoney(rec.netCost)}</div>
+          <div className="text-surface-500">{rec.netCost < 0 ? 'Credit (mid)' : 'Cost (mid)'}</div>
+          <div className="text-surface-200 font-medium">{fmtNetCost(rec.netCost)}</div>
+          {rec.naturalCost != null && (
+            <div className="text-[10px] text-surface-500" title="Executable price: buy at the ask, sell at the bid">
+              natural {fmtNetCost(rec.naturalCost)}
+            </div>
+          )}
         </div>
         <div>
           <div className="text-surface-500">Max Profit</div>
@@ -120,10 +139,17 @@ function RecCard({ rec, rank }) {
         <div>
           <div className="text-surface-500">RoC</div>
           <div className={`font-medium ${rec.returnOnCapital >= 3 ? 'text-emerald-400' : 'text-surface-200'}`}>
-            {rec.returnOnCapital != null ? `${rec.returnOnCapital.toFixed(1)}×` : '—'}
+            {rec.returnOnCapital != null ? `${rec.returnOnCapital.toFixed(rec.returnOnCapital < 1 ? 2 : 1)}×` : '—'}
           </div>
         </div>
       </div>
+
+      {rec.regimeNote && (
+        <div className="mb-3 flex items-center gap-1.5 text-[10px] text-yellow-300">
+          <AlertTriangle size={10} />
+          <span>{rec.regimeNote}</span>
+        </div>
+      )}
 
       {/* Why this pick */}
       <div className="rounded-lg bg-surface-900/50 border border-surface-800 p-3 space-y-1.5">
@@ -172,7 +198,7 @@ function BandSection({ bandData }) {
 
       {recs.length === 0 ? (
         <div className="text-center py-8 text-surface-500 text-xs">
-          No setups cleared the RoC ≥ 3× and PoP ≥ 30% gates in this band.
+          No setups cleared the quality gates in this band (debit: RoC ≥ 3× &amp; PoP ≥ 30%; credit: OTM, ≥ 20% of width &amp; PoP ≥ 55%; tradeable quotes).
           <div className="mt-1 text-[10px] text-surface-600">
             We don&apos;t pad with low-quality trades — check back as conditions shift.
           </div>
@@ -245,7 +271,7 @@ export default function OptionsOpportunitiesTab() {
             <h1 className="text-2xl font-black tracking-tight">Options Opportunities</h1>
           </div>
           <p className="text-sm text-surface-400">
-            Defined-risk spreads only — every pick clears RoC ≥ 3× and PoP ≥ 30%
+            Defined-risk spreads only — debit spreads clear RoC ≥ 3× &amp; PoP ≥ 30%; credit spreads must be out-of-the-money with ≥ 20% credit &amp; PoP ≥ 55%
           </p>
         </div>
         {scan && (
@@ -302,6 +328,19 @@ export default function OptionsOpportunitiesTab() {
 
       {scan && !error && (
         <>
+          {/* Crash regime overlay */}
+          {scan.regime && (
+            <div className={`rounded-xl border px-4 py-3 text-xs flex flex-col sm:flex-row sm:items-center gap-2 justify-between ${REGIME_STYLES[scan.regime.level] || REGIME_STYLES.calm}`}>
+              <div className="flex items-start gap-2">
+                <ShieldAlert size={14} className="shrink-0 mt-0.5" />
+                <span>{scan.regime.note}</span>
+              </div>
+              <a href="#thesis" className="flex items-center gap-1 font-medium underline-offset-2 hover:underline shrink-0">
+                Crash Thesis hedges <ChevronRight size={12} />
+              </a>
+            </div>
+          )}
+
           {/* Three band sections */}
           {bands.map((band) => (
             <BandSection key={band.band} bandData={band} />

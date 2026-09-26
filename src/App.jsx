@@ -10,6 +10,7 @@ import {
   ArrowUpRight, Zap, Info, Check, Clock, Flame, Globe, Radio,
   ArrowDownRight, Layers, CandlestickChart, Upload, MessageCircle, Bot,
   Briefcase, FileText, Gauge, Activity, Radar, Scale, Landmark,
+  CloudLightning, ChartPie,
 } from 'lucide-react';
 import { useMarketData } from './hooks/useMarketData';
 import MarketsTab from './components/MarketsTab';
@@ -43,6 +44,7 @@ import { PortfolioProvider } from './contexts/PortfolioContext.jsx';
 import SectionTimestamp from './components/SectionTimestamp';
 import WeeklyTrendView from './components/WeeklyTrendView';
 import CrashRadarTab from './components/CrashRadarTab.jsx';
+import CrashThesisTab from './components/CrashThesisTab.jsx';
 import OptionsOpportunitiesTab from './components/OptionsOpportunitiesTab.jsx';
 import CrashGauge from './components/CrashGauge.jsx';
 import LeapsAnalyzerTab from './components/LeapsAnalyzerTab';
@@ -195,13 +197,14 @@ const TABS = [
   { id: 'volatility', label: 'Volatility', icon: Activity },
   { id: 'bonds', label: 'Bond Market', icon: Landmark },
   { id: 'crash', label: 'Crash Radar', icon: Radar },
+  { id: 'thesis', label: 'Crash Thesis (Karsan)', icon: CloudLightning },
   { id: 'options', label: 'Options', icon: Layers },
   { id: 'spreads', label: 'Spread Finder', icon: Target },
   { id: 'leaps', label: 'LEAPS Analyzer', icon: Scale },
   { id: 'social', label: 'Social Pulse', icon: MessageCircle },
   { id: 'ai', label: 'Market Assistant', icon: Bot },
   { id: 'projections', label: 'Projections', icon: TrendingUp },
-  { id: 'portfolio', label: 'Portfolio', icon: PieChart },
+  { id: 'portfolio', label: 'Portfolio', icon: ChartPie },
   { id: 'tax', label: 'Tax Strategy', icon: DollarSign },
   { id: 'retirement', label: 'Retirement', icon: PiggyBank },
   { id: 'brokerplan', label: 'Brokerage Plan', icon: Briefcase },
@@ -658,6 +661,7 @@ export default function App() {
     volatility: () => <VolatilityTab />,
     bonds: () => <BondMarketTab />,
     crash: () => <CrashRadarTab />,
+    thesis: () => <CrashThesisTab />,
     options: renderOptions,
     opportunities: () => <OptionsOpportunitiesTab />,
     spreads: renderSpreads,
