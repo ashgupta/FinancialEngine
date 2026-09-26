@@ -149,6 +149,79 @@ describe('buildIncomeSpread (engine) — OTM with credit/PoP gates', () => {
   });
 });
 
+// ─── Minimum position profit per band ────────────────────────────────────
+
+describe('sizePosition — band profit floors', () => {
+  const { sizePosition } = ooInternal;
+  const rec = (maxProfit, maxLoss, extra = {}) => ({ maxProfit, maxLoss, netCost: maxLoss, naturalCost: maxLoss + 10, why: { riskNote: 'x.' }, ...extra });
+
+  it('band floors are $1k / $2k / $5k', async () => {
+    const { BANDS } = await import('../../src/engine/optionsOpportunities.js');
+    expect(BANDS.short.minPositionProfit).toBe(1000);
+    expect(BANDS.medium.minPositionProfit).toBe(2000);
+    expect(BANDS.leaps.minPositionProfit).toBe(5000);
+  });
+
+  it('sizes contracts up to the floor (ceil) and scales position totals', () => {
+    const r = rec(300, 100);
+    expect(sizePosition(r, 'short', 10000)).toBe(true);
+    expect(r.contracts).toBe(4); // 4 × $300 = $1,200 ≥ $1,000
+    expect(r.positionMaxProfit).toBe(1200);
+    expect(r.positionMaxLoss).toBe(400);
+    expect(r.positionNetCost).toBe(400);
+    expect(r.positionNaturalCost).toBe(440);
+    expect(r.why.riskNote).toMatch(/Sized to 4 contracts/);
+  });
+
+  it('boundary: one contract when per-contract profit already meets the floor', () => {
+    const r = rec(5000, 1500);
+    expect(sizePosition(r, 'leaps', 10000)).toBe(true);
+    expect(r.contracts).toBe(1);
+  });
+
+  it('rejects when the required capital at risk exceeds the allocation', () => {
+    // Credit spread: $150 profit / $350 risk → 14 contracts → $4,900 risk
+    expect(sizePosition(rec(150, 350), 'medium', 4000)).toBe(false);
+    expect(sizePosition(rec(150, 350), 'medium', 5000)).toBe(true);
+  });
+
+  it('allocation ≤ 0 means uncapped', () => {
+    expect(sizePosition(rec(10, 1000), 'leaps', 0)).toBe(true);
+  });
+
+  it('invalid input → false', () => {
+    expect(sizePosition(null, 'short', 10000)).toBe(false);
+    expect(sizePosition(rec(0, 100), 'short', 10000)).toBe(false);
+    expect(sizePosition(rec(Infinity, 100), 'short', 10000)).toBe(false);
+    expect(sizePosition(rec(100, 0), 'short', 10000)).toBe(false);
+  });
+
+  it('end-to-end: every recommendation meets its band floor within the allocation', () => {
+    const chainFor = (spot) => {
+      const calls = [];
+      for (let i = -6; i <= 6; i++) {
+        const k = spot + i * 5;
+        const m = Math.max(0, spot - k) + Math.max(0.2, 3 - Math.max(0, i) * 0.4);
+        calls.push(opt(k, +(m - 0.05).toFixed(2), +(m + 0.05).toFixed(2), 0.25));
+      }
+      return { expirations: [D(60)], calls, puts: [], underlyingPrice: spot, expirationDate: D(60) };
+    };
+    const universe = [{ symbol: 'AAA', name: 'AAA', history: makeHistory(150, 200) }];
+    const chains = new Map([['AAA', chainFor(200)]]);
+    const res = buildOptionsOpportunities({ universe, chains, allocationPerTrade: 10000 });
+    expect(res.allocationPerTrade).toBe(10000);
+    for (const band of res.bands) {
+      for (const r of band.recommendations) {
+        expect(r.positionMaxProfit).toBeGreaterThanOrEqual(band.minPositionProfit);
+        expect(r.positionMaxLoss).toBeLessThanOrEqual(10000);
+      }
+    }
+    // A tiny allocation filters everything out rather than returning undersized trades
+    const tiny = buildOptionsOpportunities({ universe, chains, allocationPerTrade: 1 });
+    for (const band of tiny.bands) expect(band.recommendations).toEqual([]);
+  });
+});
+
 // ─── Fix #4: crash-regime overlay ────────────────────────────────────────
 
 describe('crash regime overlay', () => {

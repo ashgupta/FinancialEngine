@@ -45,6 +45,8 @@ function fmtNetCost(v) {
   return v < 0 ? `+$${Math.abs(v).toFixed(0)} cr` : `$${v.toFixed(0)}`;
 }
 
+const ALLOCATION_KEY = 'optionsOpp:allocationPerTrade';
+
 const REGIME_STYLES = {
   calm: 'border-emerald-500/30 bg-emerald-500/5 text-emerald-300',
   watch: 'border-blue-500/30 bg-blue-500/5 text-blue-300',
@@ -110,25 +112,37 @@ function RecCard({ rec, rank }) {
         ))}
       </div>
 
-      {/* Key metrics */}
+      {/* Position sizing */}
+      {rec.contracts != null && (
+        <div className="mb-2 flex items-center justify-between rounded-lg bg-surface-900/50 border border-surface-800 px-3 py-1.5 text-[11px]">
+          <span className="text-surface-400">
+            Position: <span className="font-semibold text-surface-100">{rec.contracts} contract{rec.contracts > 1 ? 's' : ''}</span>
+          </span>
+          <span className="text-surface-500">
+            floor {fmtMoney(rec.minPositionProfit)} · 1 contract: {fmtNetCost(rec.netCost)}
+          </span>
+        </div>
+      )}
+
+      {/* Key metrics (position totals) */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3 text-[11px]">
         <div>
           <div className="text-surface-500">{rec.netCost < 0 ? 'Credit (mid)' : 'Cost (mid)'}</div>
-          <div className="text-surface-200 font-medium">{fmtNetCost(rec.netCost)}</div>
-          {rec.naturalCost != null && (
+          <div className="text-surface-200 font-medium">{fmtNetCost(rec.positionNetCost ?? rec.netCost)}</div>
+          {(rec.positionNaturalCost ?? rec.naturalCost) != null && (
             <div className="text-[10px] text-surface-500" title="Executable price: buy at the ask, sell at the bid">
-              natural {fmtNetCost(rec.naturalCost)}
+              natural {fmtNetCost(rec.positionNaturalCost ?? rec.naturalCost)}
             </div>
           )}
         </div>
         <div>
           <div className="text-surface-500">Max Profit</div>
-          <div className="text-emerald-400 font-medium">{fmtMoney(rec.maxProfit)}</div>
+          <div className="text-emerald-400 font-medium">{fmtMoney(rec.positionMaxProfit ?? rec.maxProfit)}</div>
         </div>
         <div>
           <div className="text-surface-500">Max Loss</div>
           <div className={`font-medium ${drawdownFlag ? 'text-red-400' : 'text-surface-200'}`}>
-            {fmtMoney(rec.maxLoss)}
+            {fmtMoney(rec.positionMaxLoss ?? rec.maxLoss)}
             {drawdownFlag && <ShieldAlert size={10} className="inline ml-1" />}
           </div>
         </div>
@@ -193,12 +207,17 @@ function BandSection({ bandData }) {
           <h3 className={`text-sm font-bold ${style.color}`}>{bandData.label}</h3>
           <span className="text-[10px] text-surface-500">{bandData.description}</span>
         </div>
-        <span className="text-xs text-surface-500">{recs.length}/5 picks</span>
+        <div className="text-right">
+          <span className="block text-xs text-surface-500">{recs.length}/5 picks</span>
+          {bandData.minPositionProfit != null && (
+            <span className="block text-[10px] text-surface-500">min profit {fmtMoney(bandData.minPositionProfit)}</span>
+          )}
+        </div>
       </div>
 
       {recs.length === 0 ? (
         <div className="text-center py-8 text-surface-500 text-xs">
-          No setups cleared the quality gates in this band (debit: RoC ≥ 3× &amp; PoP ≥ 30%; credit: OTM, ≥ 20% of width &amp; PoP ≥ 55%; tradeable quotes).
+          No setups cleared the quality gates in this band (debit: RoC ≥ 3× &amp; PoP ≥ 30%; credit: OTM, ≥ 20% of width &amp; PoP ≥ 55%; tradeable quotes; max profit ≥ {fmtMoney(bandData.minPositionProfit)} within the allocation).
           <div className="mt-1 text-[10px] text-surface-600">
             We don&apos;t pad with low-quality trades — check back as conditions shift.
           </div>
@@ -222,6 +241,22 @@ export default function OptionsOpportunitiesTab() {
   const [scan, setScan] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [allocation, setAllocation] = useState(() => {
+    const saved = Number(localStorage.getItem(ALLOCATION_KEY));
+    return Number.isFinite(saved) && saved > 0 ? saved : 10000;
+  });
+  const [allocationInput, setAllocationInput] = useState(String(allocation));
+
+  // Debounce the input → allocation (which triggers a refetch)
+  useEffect(() => {
+    const v = Number(allocationInput);
+    if (!Number.isFinite(v) || v < 500) return undefined;
+    const id = setTimeout(() => {
+      setAllocation(v);
+      try { localStorage.setItem(ALLOCATION_KEY, String(v)); } catch { /* ignore */ }
+    }, 600);
+    return () => clearTimeout(id);
+  }, [allocationInput]);
 
   // Build universe from watchlist + portfolio
   const universeSymbols = useMemo(() => {
@@ -241,7 +276,7 @@ export default function OptionsOpportunitiesTab() {
         body: JSON.stringify({
           symbols: universeSymbols,
           heldSymbols: [...heldSet],
-          allocationPerTrade: 10000,
+          allocationPerTrade: allocation,
         }),
       });
       if (!res.ok) {
@@ -257,7 +292,7 @@ export default function OptionsOpportunitiesTab() {
     }
   };
 
-  useEffect(() => { refresh(); }, [universeSymbols.join(',')]);
+  useEffect(() => { refresh(); }, [universeSymbols.join(','), allocation]);
 
   const bands = scan?.bands || [];
 
@@ -299,6 +334,26 @@ export default function OptionsOpportunitiesTab() {
           {scan?.universeSize && (
             <span className="text-surface-500">→ {scan.universeSize} total</span>
           )}
+        </div>
+        <div className="mt-3 pt-3 border-t border-surface-800 flex flex-col sm:flex-row sm:items-end gap-3">
+          <label className="block">
+            <span className="block text-[11px] text-surface-400 mb-1">Allocation per trade (capital at risk cap)</span>
+            <div className="relative w-44">
+              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-surface-500 text-xs">$</span>
+              <input
+                type="number"
+                min={500}
+                step={1000}
+                value={allocationInput}
+                onChange={(e) => setAllocationInput(e.target.value)}
+                className="w-full bg-surface-800 border border-surface-700 rounded-lg py-2 pl-6 pr-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/50"
+              />
+            </div>
+          </label>
+          <p className="text-[11px] text-surface-500 leading-relaxed">
+            Each pick is sized to reach its band&apos;s minimum max-profit — Short-term $1,000 · Medium-term $2,000 · LEAPS $5,000 —
+            and rejected if that needs more capital at risk than this allocation. Positions risking &gt; 15% of it are flagged.
+          </p>
         </div>
       </Card>
 

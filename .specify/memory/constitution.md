@@ -783,6 +783,12 @@ integration.
   quote; combined leg bid/ask width MUST be ≤ 35% of the strike width;
   and the natural (buy-at-ask / sell-at-bid) price MUST still leave a
   profit. Recommendations MUST expose the natural price alongside mid.
+- **Minimum position profit** (v1.12.1): each band has a floor on the
+  sized position's max profit — Short-term $1,000, Medium-term $2,000,
+  LEAPS $5,000. The engine MUST size the contract count to reach the
+  floor and MUST reject the trade when the resulting capital at risk
+  exceeds the user-editable per-trade allocation (default $10,000).
+  Cards MUST show contract count and position totals.
 - **Crash-regime overlay** (v1.12.0): the engine MUST accept the Crash
   Radar result and, at Elevated/High/Severe, de-rate bullish scores and
   lift bearish scores, returning a `regime` summary rendered as a banner.
@@ -938,4 +944,4 @@ tracking, and WeeklyTrendView required by Principle XV.
 - Runtime guidance for AI agents lives in `.windsurf/rules/` and `.windsurf/workflows/`;
   those documents MUST stay consistent with this constitution.
 
-**Version**: 1.12.0 | **Ratified**: 2026-05-09 | **Last Amended**: 2026-09-26
+**Version**: 1.12.1 | **Ratified**: 2026-05-09 | **Last Amended**: 2026-09-26

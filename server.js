@@ -1232,10 +1232,13 @@ app.post('/options/opportunities', async (req, res) => {
   try {
     const clientUniverse = (req.body?.symbols || []).filter(validateSymbol).slice(0, 50);
     const heldSet = new Set((req.body?.heldSymbols || []).filter(validateSymbol));
-    const allocationPerTrade = req.body?.allocationPerTrade || 10000;
+    const rawAlloc = Number(req.body?.allocationPerTrade);
+    const allocationPerTrade = Number.isFinite(rawAlloc) && rawAlloc > 0
+      ? Math.min(Math.max(rawAlloc, 500), 10_000_000)
+      : 10000;
 
-    // Cache key: sorted unique symbols
-    const cacheKey = [...new Set([...clientUniverse])].sort().join(',');
+    // Cache key: sorted unique symbols + allocation (sizing depends on it)
+    const cacheKey = `${[...new Set([...clientUniverse])].sort().join(',')}|${allocationPerTrade}`;
     if (optionsOppCache && optionsOppCache.expiresAt > Date.now()
         && optionsOppCache.key === cacheKey && req.query.refresh !== '1') {
       return res.json({ ...optionsOppCache.data, cached: true });

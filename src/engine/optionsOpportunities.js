@@ -47,10 +47,13 @@ import { bsCallDelta, bsCallPrice } from './leapsAnalyzer.js';
 
 // ─── Constants ───────────────────────────────────────────
 
+// minPositionProfit: user-set floor on the POSITION's max profit ($). The
+// engine sizes the contract count to reach it and rejects the trade when
+// the required capital at risk exceeds the per-trade allocation.
 const BANDS = {
-  short: { label: 'Short-term', dteMin: 0, dteMax: 365, description: 'Expiries ≤ 1 year — swing trades and tactical hedges' },
-  medium: { label: 'Medium-term', dteMin: 366, dteMax: 730, description: 'Expiries 1–2 years — structural views with time' },
-  leaps: { label: 'LEAPS', dteMin: 731, dteMax: Infinity, description: 'Expiries > 2 years — leveraged long-term investing' },
+  short: { label: 'Short-term', dteMin: 0, dteMax: 365, minPositionProfit: 1000, description: 'Expiries ≤ 1 year — swing trades and tactical hedges' },
+  medium: { label: 'Medium-term', dteMin: 366, dteMax: 730, minPositionProfit: 2000, description: 'Expiries 1–2 years — structural views with time' },
+  leaps: { label: 'LEAPS', dteMin: 731, dteMax: Infinity, minPositionProfit: 5000, description: 'Expiries > 2 years — leveraged long-term investing' },
 };
 
 const MAX_RECS_PER_BAND = 5;
@@ -779,6 +782,37 @@ function applyRegime(rec, regime) {
   return rec;
 }
 
+// ─── Position sizing to the band's profit floor ──────────
+
+/**
+ * Size a recommendation so its position max profit reaches the band floor.
+ * Mutates `rec` with contracts / position* fields and returns true, or
+ * returns false when the floor can't be reached within `allocation`
+ * (capital at risk = contracts × per-contract max loss).
+ * @param {object} rec
+ * @param {'short'|'medium'|'leaps'} band
+ * @param {number} allocation  per-trade capital cap in $ (≤ 0 → uncapped)
+ * @returns {boolean}
+ */
+export function sizePosition(rec, band, allocation) {
+  const floor = BANDS[band]?.minPositionProfit ?? 0;
+  if (!rec || !(rec.maxProfit > 0) || !Number.isFinite(rec.maxProfit) || !(rec.maxLoss > 0)) return false;
+  const contracts = Math.max(1, Math.ceil(floor / rec.maxProfit));
+  const positionMaxLoss = contracts * rec.maxLoss;
+  if (allocation > 0 && positionMaxLoss > allocation) return false;
+
+  rec.minPositionProfit = floor;
+  rec.contracts = contracts;
+  rec.positionMaxProfit = contracts * rec.maxProfit;
+  rec.positionMaxLoss = positionMaxLoss;
+  rec.positionNetCost = rec.netCost != null ? contracts * rec.netCost : null;
+  rec.positionNaturalCost = rec.naturalCost != null ? contracts * rec.naturalCost : null;
+  if (rec.why) {
+    rec.why.riskNote += ` Sized to ${contracts} contract${contracts > 1 ? 's' : ''} to reach the $${floor.toLocaleString()} ${BANDS[band].label} profit floor: position max profit $${rec.positionMaxProfit.toFixed(0)}, capital at risk $${positionMaxLoss.toFixed(0)}.`;
+  }
+  return true;
+}
+
 // ─── Main entry point ────────────────────────────────────
 
 /**
@@ -838,11 +872,11 @@ export function buildOptionsOpportunities(params = {}) {
       }
 
       const rec = selectStrategy(asset, chain, bandKey, heldSet, shortChain);
-      if (rec) {
+      if (rec && sizePosition(rec, bandKey, allocationPerTrade)) {
         applyRegime(rec, regime);
-        // Drawdown guard check
-        if (allocationPerTrade > 0 && rec.maxLoss > 0) {
-          const lossPct = (rec.maxLoss / allocationPerTrade) * 100;
+        // Drawdown guard check (on the sized position)
+        if (allocationPerTrade > 0 && rec.positionMaxLoss > 0) {
+          const lossPct = (rec.positionMaxLoss / allocationPerTrade) * 100;
           rec.drawdownFlag = lossPct > DRAWDOWN_GUARD_PCT;
           rec.lossPctOfAllocation = +lossPct.toFixed(1);
         }
@@ -870,6 +904,7 @@ export function buildOptionsOpportunities(params = {}) {
       { band: 'leaps', ...BANDS.leaps, recommendations: bandResults.leaps || [] },
     ],
     regime,
+    allocationPerTrade,
     asOf: new Date().toISOString(),
   };
 }
@@ -887,6 +922,7 @@ export const _internal = {
   pickCallByDelta,
   estimateDelta,
   hasTradeableQuote,
+  sizePosition,
   buildRegime,
   REGIME_MULTIPLIERS,
   MIN_RETURN_ON_CAPITAL,
