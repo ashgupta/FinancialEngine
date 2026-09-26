@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   CloudLightning, RefreshCw, AlertTriangle, Info, Hourglass, CheckCircle2,
-  XCircle, MinusCircle, ShieldAlert, Coins, ExternalLink, TrendingUp, Layers, Flag,
+  XCircle, MinusCircle, ShieldAlert, Coins, ExternalLink, TrendingUp, Layers, Flag, Crosshair,
 } from 'lucide-react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -42,7 +42,7 @@ const STATUS = {
   against: { icon: XCircle, cls: 'text-red-400', text: 'Against' },
 };
 
-const TRADE_COLORS = { calendar: '#3b82f6', diagonal: '#a855f7', putSpread: '#f59e0b', killSwitchPut: '#ef4444' };
+const TRADE_COLORS = { calendar: '#3b82f6', diagonal: '#a855f7', putSpread: '#f59e0b', killSwitchPut: '#ef4444', symFly: '#22d3ee', bwbFly: '#f472b6' };
 
 const money = (v) => (v == null || isNaN(v) ? '—' : `${v < 0 ? '−' : ''}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}`);
 const signedMoney = (v) => (v == null || isNaN(v) ? '—' : `${v > 0 ? '+' : v < 0 ? '−' : ''}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}`);
@@ -105,7 +105,7 @@ function TradeCard({ t }) {
             <tr key={i} className="border-b border-surface-800/50">
               <td className="py-1">
                 <span className={l.action === 'BUY' ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}>{l.action}</span>
-                {' '}${l.strike} put
+                {' '}${l.strike} put{l.qty > 1 ? ` ×${l.qty}` : ''}
               </td>
               <td className="py-1 text-surface-400">{l.expiryLabel} <span className="text-surface-600">({l.dte}d)</span></td>
               <td className="py-1 text-right text-surface-500">{l.bid.toFixed(2)} / {l.ask.toFixed(2)}</td>
@@ -134,6 +134,14 @@ function TradeCard({ t }) {
           <p className={`font-semibold ${t.pnlAtMinus30 >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{signedMoney(t.pnlAtMinus30)}</p>
         </div>
       </div>
+
+      {t.breakevens && (
+        <p className="text-[11px] text-surface-400">
+          Profit zone at expiry: <span className="text-surface-200 font-medium">${t.breakevens.lower != null ? t.breakevens.lower.toLocaleString() : `≤ ${t.lowerStrike.toLocaleString()} (floor ${money(t.tailFloor)})`} – ${t.breakevens.upper.toLocaleString()}</span>
+          <span className="text-surface-500"> · starts paying below −{(t.breakevens.entryDecline * 100).toFixed(1)}%</span>
+          {t.netDebitExec != null && <span className="text-surface-500"> · executable ≈ {money(t.netDebitExec * 100)}</span>}
+        </p>
+      )}
 
       {t.ivEdge != null && (
         <p className="text-[11px] text-surface-400">
@@ -167,10 +175,26 @@ function TradeCard({ t }) {
 
 // ─── Main tab ───────────────────────────────────────────
 
+const UNDERLYING_KEY = 'crashThesisUnderlying';
+const UNDERLYING_CHOICES = [
+  { key: 'spy', label: 'SPY', hint: 'ETF · American · share-settled' },
+  { key: 'xsp', label: 'XSP', hint: 'Mini-index · European · cash · §1256' },
+  { key: 'spx', label: 'SPX', hint: 'Index · European · cash · §1256 · ~10× size' },
+];
+
 export default function CrashThesisTab() {
   const [portfolio, setPortfolio] = useState(500000);
   const [budgetPct, setBudgetPct] = useState(2);
   const [equityPct, setEquityPct] = useState(80);
+  const [underlying, setUnderlying] = useState(() => {
+    const saved = localStorage.getItem(UNDERLYING_KEY);
+    return UNDERLYING_CHOICES.some((c) => c.key === saved) ? saved : 'spy';
+  });
+  const [flyTarget, setFlyTarget] = useState(() => {
+    const saved = Number(localStorage.getItem('crashThesisFlyTarget'));
+    return Number.isFinite(saved) && saved >= 5 && saved <= 50 ? saved : 20;
+  });
+  const [flyExpiry, setFlyExpiry] = useState('');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -184,7 +208,10 @@ export default function CrashThesisTab() {
         portfolio: String(portfolio),
         budget: String(budgetPct / 100),
         equity: String(equityPct / 100),
+        underlying,
+        flyTarget: String(flyTarget / 100),
       });
+      if (flyExpiry) qs.set('flyExpiry', flyExpiry);
       if (forceRefresh) qs.set('refresh', '1');
       const res = await fetch(`/thesis/karsan?${qs}`);
       const j = await res.json().catch(() => ({}));
@@ -197,6 +224,16 @@ export default function CrashThesisTab() {
     }
   };
 
+  const pickUnderlying = (key) => {
+    setUnderlying(key);
+    try { localStorage.setItem(UNDERLYING_KEY, key); } catch { /* ignore */ }
+  };
+
+  const changeFlyTarget = (v) => {
+    setFlyTarget(v);
+    try { localStorage.setItem('crashThesisFlyTarget', String(v)); } catch { /* ignore */ }
+  };
+
   // Initial load, then debounced re-sizing (server re-runs the pure engine on cached market data)
   useEffect(() => {
     if (firstLoad.current) {
@@ -206,9 +243,11 @@ export default function CrashThesisTab() {
     }
     const id = setTimeout(() => load(), 400);
     return () => clearTimeout(id);
-  }, [portfolio, budgetPct, equityPct]);
+  }, [portfolio, budgetPct, equityPct, underlying, flyTarget, flyExpiry]);
 
   const phase = data?.phase;
+  const uLabel = data?.underlying?.label || 'SPY';
+  const uNote = data?.underlying?.note || UNDERLYING_CHOICES.find((c) => c.key === underlying)?.hint;
   const chartData = data?.trades?.length
     ? data.trades[0].scenarios.map((s, i) => {
         const row = { move: movePct(s.move) };
@@ -255,7 +294,7 @@ export default function CrashThesisTab() {
 
       {loading && !data && (
         <Card>
-          <div className="flex items-center gap-2 text-surface-400"><RefreshCw size={16} className="animate-spin" /><span className="text-sm">Pricing SPY calendars and checking the thesis against live data…</span></div>
+          <div className="flex items-center gap-2 text-surface-400"><RefreshCw size={16} className="animate-spin" /><span className="text-sm">Pricing {uLabel} calendars and checking the thesis against live data…</span></div>
         </Card>
       )}
 
@@ -342,18 +381,36 @@ export default function CrashThesisTab() {
 
           {/* Sizing inputs */}
           <Card>
-            <Heading icon={Coins} title="Hedge Sizing" sub={`Budget ${money(data.sizing.budget)} · spot SPY ${data.spot ? `$${data.spot.toFixed(2)}` : '—'}`} />
+            <Heading icon={Coins} title="Hedge Sizing" sub={`Budget ${money(data.sizing.budget)} · spot ${uLabel} ${data.spot ? `$${data.spot.toFixed(2)}` : '—'}`} />
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <NumberInput label="Portfolio value" value={portfolio} onChange={setPortfolio} prefix="$" step={10000} min={1000} />
               <NumberInput label="Hedge budget (% of portfolio)" value={budgetPct} onChange={setBudgetPct} suffix="%" step={0.5} min={0} max={10} />
               <NumberInput label="Equity exposure" value={equityPct} onChange={setEquityPct} suffix="%" step={5} min={0} max={150} />
+            </div>
+            <div className="mt-3">
+              <span className="block text-[11px] text-surface-400 mb-1">Options underlying</span>
+              <div className="inline-flex rounded-lg border border-surface-700 overflow-hidden" role="group" aria-label="Options underlying">
+                {UNDERLYING_CHOICES.map((c) => (
+                  <button
+                    key={c.key}
+                    type="button"
+                    onClick={() => pickUnderlying(c.key)}
+                    aria-pressed={underlying === c.key}
+                    title={c.hint}
+                    className={`px-3 py-2 text-xs font-medium transition focus:outline-none focus:ring-2 focus:ring-brand-500/50 ${underlying === c.key ? 'bg-brand-500/20 text-brand-300' : 'bg-surface-800 text-surface-400 hover:text-surface-200'}`}
+                  >
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+              {uNote && <p className="text-[10px] text-surface-500 mt-1.5">{uNote}</p>}
             </div>
             <p className="text-[10px] text-surface-600 mt-2">Budget split: 40% calendar · 25% diagonal · 25% put spread · 10% kill-switch put. Contracts are rounded down so spend never exceeds the budget.</p>
           </Card>
 
           {/* Trades */}
           <div>
-            <Heading icon={Layers} title="Karsan-style structures (live SPY quotes)" sub={data.horizon?.date ? `P&L evaluated at ${data.horizon.date} (front-leg expiry)` : ''} />
+            <Heading icon={Layers} title={`Karsan-style structures (live ${uLabel} quotes)`} sub={data.horizon?.date ? `P&L evaluated at ${data.horizon.date} (front-leg expiry)` : ''} />
             {data.trades.length === 0 ? (
               <Card><p className="text-xs text-surface-500">No structures could be priced right now. {data.unavailable.join(' · ')}</p></Card>
             ) : (
@@ -366,15 +423,54 @@ export default function CrashThesisTab() {
             )}
           </div>
 
+          {/* Crash-target butterfly */}
+          {data.butterflies && (
+            <Card>
+              <Heading
+                icon={Crosshair}
+                title={`Crash-target butterfly (live ${uLabel} quotes)`}
+                sub={data.butterflies.expiryLabel ? `Expiry ${data.butterflies.expiryLabel} · target −${((data.butterflies.targetDecline || 0) * 100).toFixed(0)}% ≈ $${Number(data.butterflies.targetPrice).toLocaleString()}` : ''}
+              />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                <NumberInput label="Target decline" value={flyTarget} onChange={changeFlyTarget} suffix="%" step={5} min={5} max={50} />
+                <label className="block">
+                  <span className="block text-[11px] text-surface-400 mb-1">Expiry</span>
+                  <select
+                    value={flyExpiry}
+                    onChange={(e) => setFlyExpiry(e.target.value)}
+                    className="w-full bg-surface-800 border border-surface-700 rounded-lg py-2 pl-2.5 pr-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/50"
+                  >
+                    <option value="">Auto (post-midterm cycle)</option>
+                    {(data.butterflies.availableExpiries || []).map((e) => (
+                      <option key={e.ts} value={e.ts}>{e.label} ({e.dte}d)</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              {data.butterflies.variants?.length > 0 ? (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  {data.butterflies.variants.map((t) => <TradeCard key={t.key} t={t} />)}
+                </div>
+              ) : (
+                <p className="text-xs text-surface-500">No butterfly could be priced at this target. {data.butterflies.unavailable?.join(' · ')}</p>
+              )}
+              <p className="text-[10px] text-surface-600 mt-3">
+                A butterfly is a spot-target trade — net short vega, no kill switch, payoff only at expiry. Unlike the calendar it
+                does <span className="text-surface-400">not</span> benefit from IV expansion alone; the index must land in the profit zone.
+                Cost shown at mid; the executable line is the conservative fill estimate.
+              </p>
+            </Card>
+          )}
+
           {/* Scenario chart */}
           {chartData.length > 0 && (
             <Card>
-              <Heading icon={TrendingUp} title="Scenario P&L per contract" sub={`SPY move by ${data.horizon?.date || 'front expiry'}, with vol rising as SPY falls`} />
+              <Heading icon={TrendingUp} title="Scenario P&L per contract" sub={`${uLabel} move by ${data.horizon?.date || 'front expiry'}, with vol rising as ${uLabel} falls`} />
               <div className="h-72">
                 <ResponsiveContainer>
                   <LineChart data={chartData} margin={{ top: 5, right: 20, bottom: 5, left: 10 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                    <XAxis dataKey="move" stroke="#64748b" tick={{ fontSize: 11 }} label={{ value: 'SPY move', position: 'insideBottom', offset: -2, fill: '#94a3b8', fontSize: 11 }} />
+                    <XAxis dataKey="move" stroke="#64748b" tick={{ fontSize: 11 }} label={{ value: `${uLabel} move`, position: 'insideBottom', offset: -2, fill: '#94a3b8', fontSize: 11 }} />
                     <YAxis stroke="#64748b" tick={{ fontSize: 11 }} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} />
                     <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid #334155', fontSize: 12 }} formatter={(v, name) => [signedMoney(v), data.trades.find((t) => t.key === name)?.name || name]} />
                     <Legend formatter={(name) => data.trades.find((t) => t.key === name)?.name || name} wrapperStyle={{ fontSize: 11 }} />
@@ -395,7 +491,7 @@ export default function CrashThesisTab() {
               <table className="w-full text-xs">
                 <thead>
                   <tr className="text-surface-500 border-b border-surface-800">
-                    <th className="text-left py-2 font-medium">SPY move</th>
+                    <th className="text-left py-2 font-medium">{uLabel} move</th>
                     <th className="text-right py-2 font-medium">Unhedged</th>
                     <th className="text-right py-2 font-medium">Hedge P&amp;L</th>
                     <th className="text-right py-2 font-medium">Hedged</th>
@@ -491,7 +587,7 @@ export default function CrashThesisTab() {
           {/* IV term structure */}
           {termData.length > 1 && (
             <Card>
-              <Heading icon={Layers} title="SPY put IV term structure" sub="Near-dated OTM puts carry more IV than June — the edge a calendar/diagonal sells" />
+              <Heading icon={Layers} title={`${uLabel} put IV term structure`} sub="Near-dated OTM puts carry more IV than June — the edge a calendar/diagonal sells" />
               <div className="h-60">
                 <ResponsiveContainer>
                   <LineChart data={termData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>

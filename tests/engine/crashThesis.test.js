@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   KARSAN_THESIS,
+  UNDERLYINGS,
+  resolveUnderlying,
   bsPutPrice,
   pickExpiry,
   shockedIv,
@@ -9,6 +11,7 @@ import {
   buildTermIv,
   buildScorecard,
   buildCrashTrades,
+  buildButterflies,
   portfolioImpact,
   buildVBottomPlan,
   buildDebasementPanel,
@@ -301,6 +304,145 @@ describe('buildDebasementPanel', () => {
   });
   it('empty input', () => {
     expect(buildDebasementPanel().verdict).toMatch(/unavailable/);
+  });
+});
+
+// ─── Underlying selection (SPY / SPX / XSP) ─────────────
+
+describe('UNDERLYINGS / resolveUnderlying', () => {
+  it('resolves keys and falls back to SPY', () => {
+    expect(resolveUnderlying('spx').symbol).toBe('^SPX');
+    expect(resolveUnderlying('xsp').symbol).toBe('^XSP');
+    expect(resolveUnderlying('spy').symbol).toBe('SPY');
+    expect(resolveUnderlying('bogus').symbol).toBe('SPY');
+    expect(resolveUnderlying().symbol).toBe('SPY');
+  });
+  it('index underlyings are European, cash-settled §1256; SPY is American', () => {
+    for (const k of ['spx', 'xsp']) {
+      expect(UNDERLYINGS[k].style).toBe('european');
+      expect(UNDERLYINGS[k].cashSettled).toBe(true);
+      expect(UNDERLYINGS[k].section1256).toBe(true);
+    }
+    expect(UNDERLYINGS.spy.style).toBe('american');
+    expect(UNDERLYINGS.spy.section1256).toBe(false);
+  });
+});
+
+/** SPX-like chains: ~10× SPY spot and strikes. */
+const SPX_SPOT = 7713.5;
+function makeSpxChain(exp, { base, skew }) {
+  const T = (exp * 1000 - ASOF) / 86400000 / 365;
+  const puts = [];
+  for (let k = 5800; k <= 8200; k += 50) {
+    const iv = Math.max(0.08, base + skew * (1 - k / SPX_SPOT));
+    const px = bsPutPrice(SPX_SPOT, k, T, 0.043, 0.013, iv);
+    const m = Math.max(px, 0.5);
+    puts.push({ strike: k, bid: +(m * 0.995).toFixed(2), ask: +(m * 1.005 + 0.05).toFixed(2), impliedVolatility: iv, openInterest: 5000, volume: 200 });
+  }
+  return { expirationDate: exp, underlyingPrice: SPX_SPOT, puts, calls: [] };
+}
+const SPX_CHAINS = [
+  makeSpxChain(EXP.dec, { base: 0.123, skew: 0.75 }),
+  makeSpxChain(EXP.mar, { base: 0.126, skew: 0.6 }),
+  makeSpxChain(EXP.jun, { base: 0.131, skew: 0.48 }),
+];
+
+describe('buildCrashTrades on index underlyings', () => {
+  const r = buildCrashTrades({ asOf: ASOF, chains: SPX_CHAINS, budget: 20000, underlying: 'spx' });
+
+  it('prices all four structures at index scale', () => {
+    expect(r.trades.map((t) => t.key).sort()).toEqual(['calendar', 'diagonal', 'killSwitchPut', 'putSpread']);
+    const cal = r.trades.find((t) => t.key === 'calendar');
+    expect(cal.legs[0].strike).toBe(cal.legs[1].strike);
+    expect(cal.legs[0].strike).toBe(7350); // ~95% of 7713.5
+    expect(cal.costPerContract).toBeGreaterThan(5000); // index-scale debit
+  });
+
+  it('uses the underlying label and European-style risk text', () => {
+    const cal = r.trades.find((t) => t.key === 'calendar');
+    expect(cal.maxProfitNote).toMatch(/SPX/);
+    expect(cal.risks.join(' ')).toMatch(/no early assignment/i);
+  });
+
+  it('empty SPX chains report the underlying name', () => {
+    const e = buildCrashTrades({ asOf: ASOF, chains: [], budget: 1000, underlying: 'xsp' });
+    expect(e.unavailable[0]).toMatch(/XSP/);
+  });
+});
+
+describe('buildCrashThesis underlying handling', () => {
+  it('echoes the resolved underlying and its dividend yield', () => {
+    const r = buildCrashThesis({ asOf: ASOF, chains: SPX_CHAINS, underlying: 'spx', portfolioValue: 500000, hedgeBudgetPct: 0.02 });
+    expect(r.underlying.label).toBe('SPX');
+    expect(r.underlying.section1256).toBe(true);
+    expect(r.assumptions.dividendYield).toBe(0.013);
+    expect(r.spot).toBeCloseTo(SPX_SPOT, 1);
+  });
+  it('defaults to SPY when no underlying is given', () => {
+    const r = buildCrashThesis({ asOf: ASOF, chains: CHAINS });
+    expect(r.underlying.symbol).toBe('SPY');
+    expect(r.assumptions.dividendYield).toBe(0.01);
+  });
+});
+
+// ─── Crash-target butterflies ────────────────────────────
+
+describe('buildButterflies', () => {
+  it('builds symmetric and broken-wing variants when wings exist (10% target)', () => {
+    const r = buildButterflies({ asOf: ASOF, chains: CHAINS, targetDecline: 0.10 });
+    expect(r.variants.map((v) => v.key)).toEqual(['symFly', 'bwbFly']);
+    const fly = r.variants[0];
+    expect(fly.legs).toHaveLength(3);
+    const sell = fly.legs.find((l) => l.action === 'SELL');
+    expect(sell.qty).toBe(2);
+    expect(fly.upperStrike).toBeGreaterThan(fly.bodyStrike);
+    expect(fly.bodyStrike).toBeGreaterThan(fly.lowerStrike);
+    expect(fly.breakevens.upper).toBeLessThan(fly.upperStrike);
+    expect(fly.netDebit).toBeGreaterThan(0);
+    expect(fly.maxProfit).toBeGreaterThan(fly.maxLoss);
+    // scenario P&L is expiry payoff — peaks at the body strike
+    const bodyMove = fly.bodyStrike / r.spot - 1;
+    const near = fly.scenarios.reduce((b, s) => (Math.abs(s.move - bodyMove) < Math.abs(b.move - bodyMove) ? s : b));
+    expect(near.pnl).toBeGreaterThan(0);
+  });
+
+  it('skips the symmetric variant when its lower wing is off the board (20% target)', () => {
+    const r = buildButterflies({ asOf: ASOF, chains: CHAINS, targetDecline: 0.20 });
+    // sym lower (535) is below the fixture's strike range → only BWB survives
+    expect(r.variants.map((v) => v.key)).toEqual(['bwbFly']);
+    const bwb = r.variants[0];
+    expect(bwb.bodyStrike).toBe(615); // ~80% of 771.35
+    expect(bwb.tailFloor).not.toBeNull();
+    expect(bwb.maxProfitNote).toMatch(/SPY/);
+  });
+
+  it('respects an explicit expiry and reports the target price', () => {
+    const r = buildButterflies({ asOf: ASOF, chains: CHAINS, targetDecline: 0.10, expiryTs: EXP.jun });
+    expect(r.expiryTs).toBe(EXP.jun);
+    expect(r.expiryLabel).toBe('2027-06-17');
+    expect(r.targetPrice).toBe(694); // 771.35 × 0.9
+  });
+
+  it('clamps an extreme target and reports when no strikes bracket it', () => {
+    const r = buildButterflies({ asOf: ASOF, chains: CHAINS, targetDecline: 0.9 });
+    expect(r.variants).toEqual([]);
+    expect(r.unavailable.join(' ')).toMatch(/50%/);
+  });
+
+  it('exposes the available expiries and honors the underlying dividend yield', () => {
+    const r = buildButterflies({ asOf: ASOF, chains: SPX_CHAINS, underlying: 'spx', targetDecline: 0.20 });
+    expect(r.availableExpiries.map((e) => e.ts)).toEqual([EXP.dec, EXP.mar, EXP.jun]);
+    expect(r.variants.length).toBeGreaterThanOrEqual(1);
+    const v = r.variants[0];
+    expect(v.bodyStrike).toBe(6150); // ~80% of 7713.5 → nearest 50-pt strike
+    expect(v.maxProfitNote).toMatch(/SPX/);
+    expect(v.management.join(' ')).toMatch(/European/);
+  });
+
+  it('empty chains → no variants, reason reported', () => {
+    const r = buildButterflies({ asOf: ASOF, chains: [] });
+    expect(r.variants).toEqual([]);
+    expect(r.unavailable.length).toBeGreaterThan(0);
   });
 });
 

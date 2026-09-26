@@ -63,6 +63,37 @@ const SOFT_PREMIUM_CAP_PCT = 0.03; // hedge premium above 3% of portfolio/yr is 
 // Budget split across the four structures (primary = Karsan calendar).
 const TRADE_WEIGHTS = { calendar: 0.40, diagonal: 0.25, putSpread: 0.25, killSwitchPut: 0.10 };
 
+/**
+ * Tradeable underlyings for the thesis structures. All use a $100 contract
+ * multiplier; what differs is exercise style, settlement and tax treatment.
+ * Index options (SPX/XSP) are European + cash-settled and get §1256 60/40
+ * tax treatment; SPY is American-style and share-settled (early assignment
+ * possible on short legs). Index dividend yield ≈1.3% (S&P 500), SPY ≈1.0%.
+ */
+export const UNDERLYINGS = {
+  spy: {
+    key: 'spy', symbol: 'SPY', label: 'SPY', multiplier: 100,
+    dividendYield: 0.01, style: 'american', cashSettled: false, section1256: false,
+    note: 'ETF options: American-style, settled into shares — short legs can be assigned early.',
+  },
+  spx: {
+    key: 'spx', symbol: '^SPX', label: 'SPX', multiplier: 100,
+    dividendYield: 0.013, style: 'european', cashSettled: true, section1256: true,
+    note: 'Index options: European, cash-settled, §1256 60/40 tax treatment. ~10× SPY notional per strike.',
+  },
+  xsp: {
+    key: 'xsp', symbol: '^XSP', label: 'XSP', multiplier: 100,
+    dividendYield: 0.013, style: 'european', cashSettled: true, section1256: true,
+    note: 'Mini-SPX index options: European, cash-settled, §1256 — index treatment at ~SPY-sized notional. Chains can be thin.',
+  },
+};
+
+/** Resolve an UNDERLYINGS key (or a meta object) to a registry entry. */
+export function resolveUnderlying(u) {
+  if (u && typeof u === 'object' && u.symbol) return { multiplier: 100, ...u };
+  return UNDERLYINGS[String(u || 'spy').toLowerCase()] || UNDERLYINGS.spy;
+}
+
 const DAY_MS = 86400000;
 
 // ─── Small helpers ───────────────────────────────────────
@@ -142,18 +173,20 @@ export function shockedIv(baseIv, move, daysRemaining) {
  * @param {number} spot
  * @param {number} horizonDays days from asOf to evaluation date
  * @param {number[]} [moves]
+ * @param {number} [divYield]  underlying's dividend yield for BSM pricing
+ * @param {number} [multiplier] contract multiplier ($100 for SPY/SPX/XSP)
  */
-export function scenarioPnl(legs, spot, horizonDays, moves = SCENARIO_MOVES) {
+export function scenarioPnl(legs, spot, horizonDays, moves = SCENARIO_MOVES, divYield = SPY_DIV_YIELD, multiplier = 100) {
   const entry = legs.reduce((s, l) => s + (l.action === 'BUY' ? l.mid : -l.mid), 0);
   return moves.map((move) => {
     const S = spot * (1 + move);
     const value = legs.reduce((s, l) => {
       const remaining = l.dte - horizonDays;
       const iv = shockedIv(l.iv ?? 0.2, move, remaining);
-      const px = bsPutPrice(S, l.strike, Math.max(remaining, 0) / 365, RISK_FREE, SPY_DIV_YIELD, iv);
+      const px = bsPutPrice(S, l.strike, Math.max(remaining, 0) / 365, RISK_FREE, divYield, iv);
       return s + (l.action === 'BUY' ? px : -px);
     }, 0);
-    return { move, spot: +S.toFixed(2), pnl: +((value - entry) * 100).toFixed(0) };
+    return { move, spot: +S.toFixed(2), pnl: +((value - entry) * multiplier).toFixed(0) };
   });
 }
 
@@ -332,18 +365,20 @@ export function buildScorecard({ crash = null, volatility = null, spy = null, te
 // ─── Trade construction ──────────────────────────────────
 
 /**
- * Build the four Karsan-style structures from live SPY chains.
+ * Build the four Karsan-style structures from live option chains.
  * @param {object} p
  * @param {number} p.asOf
- * @param {object[]} p.chains      SPY chains for several expiries
+ * @param {object[]} p.chains      chains for several expiries (any supported underlying)
  * @param {number} p.budget        total hedge budget in $
  * @param {object} [p.thesis]
+ * @param {string|object} [p.underlying]  UNDERLYINGS key or meta object (default SPY)
  */
-export function buildCrashTrades({ asOf, chains = [], budget = 0, thesis = KARSAN_THESIS }) {
+export function buildCrashTrades({ asOf, chains = [], budget = 0, thesis = KARSAN_THESIS, underlying = null }) {
+  const u = resolveUnderlying(underlying);
   const byExp = new Map(chains.filter((c) => c?.expirationDate).map((c) => [c.expirationDate, c]));
   const exps = [...byExp.keys()];
   const unavailable = [];
-  if (exps.length === 0) return { trades: [], unavailable: ['No SPY option chains available'], horizon: null };
+  if (exps.length === 0) return { trades: [], unavailable: [`No ${u.label} option chains available`], horizon: null };
 
   const midtermMs = toMs(thesis.midtermDate);
   // Front leg: first standard cycle that settles after the election (~6 weeks out).
@@ -362,10 +397,10 @@ export function buildCrashTrades({ asOf, chains = [], budget = 0, thesis = KARSA
   const finalize = (t, legs, extra = {}) => {
     const netDebit = legs.reduce((s, l) => s + (l.action === 'BUY' ? l.mid : -l.mid), 0);
     if (!(netDebit > 0)) { unavailable.push(`${t.name}: no net-debit structure at current quotes`); return; }
-    const costPerContract = +(netDebit * 100).toFixed(0);
+    const costPerContract = +(netDebit * (u.multiplier || 100)).toFixed(0);
     const allocated = budget * (TRADE_WEIGHTS[t.key] || 0);
     const suggestedContracts = costPerContract > 0 ? Math.floor(allocated / costPerContract) : 0;
-    const scenarios = scenarioPnl(legs, spot, horizonDays);
+    const scenarios = scenarioPnl(legs, spot, horizonDays, SCENARIO_MOVES, u.dividendYield, u.multiplier || 100);
     const at = (m) => scenarios.find((s) => s.move === m)?.pnl ?? null;
     trades.push({
       ...t,
@@ -376,7 +411,7 @@ export function buildCrashTrades({ asOf, chains = [], budget = 0, thesis = KARSA
       weight: TRADE_WEIGHTS[t.key] || 0,
       allocated: +allocated.toFixed(0),
       suggestedContracts,
-      notionalHedged: +(suggestedContracts * 100 * spot).toFixed(0),
+      notionalHedged: +(suggestedContracts * (u.multiplier || 100) * spot).toFixed(0),
       scenarios,
       pnlAtMinus20: at(-0.20),
       pnlAtMinus30: at(-0.30),
@@ -397,13 +432,15 @@ export function buildCrashTrades({ asOf, chains = [], budget = 0, thesis = KARSA
         name: 'Put calendar (Karsan core)',
         tagline: 'Sell the post-midterm put, own June vega at the same strike',
         karsanFit: 'Exactly the structure described: near-dated premium finances longer-dated vega out to June, with a natural kill switch.',
-        maxProfitNote: 'Peaks if SPY sits near the strike at the front expiry while IV rises; loses if SPY rallies hard or crashes straight through the strike early.',
+        maxProfitNote: `Peaks if ${u.label} sits near the strike at the front expiry while IV rises; loses if ${u.label} rallies hard or crashes straight through the strike early.`,
         management: [
           `At ${legs[0].expiryLabel}, sell the next monthly put at the same or lower strike to keep financing the June leg.`,
           'Stop rolling new short puts once the drawdown is underway — let the long June put run.',
           `Kill switch: if no drawdown has started by ${thesis.killSwitchDate}, close the June put and turn long.`,
         ],
-        risks: ['Short put can be assigned early if deep ITM', 'Sharp rally decays the June put', 'IV collapse hurts the long vega leg'],
+        risks: [
+          u.style === 'european' ? 'European-style: no early assignment, but the short leg can still move deep ITM' : 'Short put can be assigned early if deep ITM',
+          'Sharp rally decays the June put', 'IV collapse hurts the long vega leg'],
       }, legs, { ivEdge });
     } else unavailable.push('Put calendar: no common tradeable strike in both expiries');
   } else unavailable.push('Put calendar: missing post-midterm or June expiry');
@@ -442,10 +479,10 @@ export function buildCrashTrades({ asOf, chains = [], budget = 0, thesis = KARSA
         name: 'June crash put spread',
         tagline: 'Defined payoff for a 5–20% decline by June',
         karsanFit: 'Monetizes the drawdown directly at expiry; cheaper than an outright put because it caps the payoff at a 20% decline.',
-        maxProfitNote: `Max profit $${((width - (mid(long) - mid(short))) * 100).toFixed(0)} per contract if SPY ≤ $${short.strike} at expiry.`,
-        management: ['Take profits early if SPY reaches the short strike before June — most of the value is captured.', `Close by ${thesis.killSwitchDate} if no drawdown has started.`],
+        maxProfitNote: `Max profit $${((width - (mid(long) - mid(short))) * (u.multiplier || 100)).toFixed(0)} per contract if ${u.label} ≤ $${short.strike} at expiry.`,
+        management: [`Take profits early if ${u.label} reaches the short strike before June — most of the value is captured.`, `Close by ${thesis.killSwitchDate} if no drawdown has started.`],
         risks: ['Payoff capped below the short strike', 'Loses the full debit if SPY finishes above the long strike'],
-      }, legs, { maxProfit: +((width - (mid(long) - mid(short))) * 100).toFixed(0) });
+      }, legs, { maxProfit: +((width - (mid(long) - mid(short))) * (u.multiplier || 100)).toFixed(0) });
     }
   }
 
@@ -472,6 +509,139 @@ export function buildCrashTrades({ asOf, chains = [], budget = 0, thesis = KARSA
     spot,
     horizon: front ? { days: horizonDays, date: isoDate(front.expirationDate * 1000) } : { days: horizonDays, date: null },
   };
+}
+
+// ─── Crash-target butterflies ────────────────────────────
+
+/**
+ * Build put-butterfly variants targeting a specific decline by a chosen
+ * expiry. Two shapes when strikes allow:
+ *  - symmetric:  buy upper / sell 2× body / buy lower (wings equidistant)
+ *  - broken-wing: same but the lower wing is half-width, so the position
+ *    still pays a floor if the crash overshoots the body (the upper tail
+ *    is forfeited instead).
+ * Unlike the calendar, these are spot-target trades: net short vega, payoff
+ * is expiry-dependent, no kill switch.
+ *
+ * @param {object} p
+ * @param {number} p.asOf
+ * @param {object[]} p.chains
+ * @param {string|object} [p.underlying]
+ * @param {number} [p.targetDecline=0.20]  fraction, clamped to 0.05–0.50
+ * @param {number|null} [p.expiryTs]       chain expiry (seconds) to use; default = post-midterm cycle
+ * @param {object} [p.thesis]
+ */
+export function buildButterflies({ asOf, chains = [], underlying = null, targetDecline = 0.20, expiryTs = null, thesis = KARSAN_THESIS }) {
+  const u = resolveUnderlying(underlying);
+  const mult = u.multiplier || 100;
+  const byExp = new Map(chains.filter((c) => c?.expirationDate).map((c) => [c.expirationDate, c]));
+  const exps = [...byExp.keys()];
+  const availableExpiries = exps
+    .map((e) => ({ ts: e, label: isoDate(e * 1000), dte: daysBetween(asOf, e * 1000) }))
+    .sort((a, b) => a.ts - b.ts);
+  const out = { variants: [], unavailable: [], availableExpiries, expiryTs: null, expiryLabel: null, spot: null, targetDecline: null, targetPrice: null };
+  if (exps.length === 0) { out.unavailable.push(`No ${u.label} option chains available`); return out; }
+
+  // Expiry: user choice, else the post-midterm cycle (~6 weeks after the election), else nearest ≥ 7d
+  let exp = null;
+  if (expiryTs != null && byExp.has(expiryTs)) exp = expiryTs;
+  else exp = pickExpiry(exps, toMs(thesis.midtermDate) + 45 * DAY_MS, { minMs: toMs(thesis.midtermDate) + 7 * DAY_MS })
+    || pickExpiry(exps, asOf + 60 * DAY_MS, { minMs: asOf + 7 * DAY_MS });
+  const chain = exp ? byExp.get(exp) : null;
+  if (!chain) { out.unavailable.push('No usable expiry for the butterfly'); return out; }
+  const spot = chain.underlyingPrice;
+  if (!(spot > 0)) { out.unavailable.push('Underlying price unavailable'); return out; }
+
+  const t = clamp(targetDecline, 0.05, 0.50);
+  out.expiryTs = exp; out.expiryLabel = isoDate(exp * 1000); out.spot = spot;
+  out.targetDecline = t; out.targetPrice = +(spot * (1 - t)).toFixed(0);
+
+  const body = pickPut(chain, spot * (1 - t));
+  const upper = pickPut(chain, spot * (1 - t / 2)); // fly starts paying halfway to the target
+  if (!body || !upper || !(upper.strike > body.strike)) {
+    out.unavailable.push(`No tradeable strikes bracket a −${(t * 100).toFixed(0)}% move at ${out.expiryLabel}`);
+    return out;
+  }
+  const width = upper.strike - body.strike;
+
+  const flatLegs = (legs) => legs.flatMap((l) => Array.from({ length: l.qty || 1 }, () => ({ ...l, qty: 1 })));
+  const usedLowerStrikes = new Set();
+
+  const mkVariant = (lowerTarget, key, name, tagline, extra = {}) => {
+    const lower = pickPut(chain, lowerTarget);
+    // Require the snapped strike to be below the body and near the intended
+    // wing — otherwise the "symmetric" fly would silently become lopsided.
+    if (!lower || !(lower.strike < body.strike)
+      || Math.abs(lower.strike - lowerTarget) > width / 2
+      || usedLowerStrikes.has(lower.strike)) return;
+    usedLowerStrikes.add(lower.strike);
+    const legs = [
+      legOf('BUY', upper, chain, asOf),
+      { ...legOf('SELL', body, chain, asOf), qty: 2 },
+      legOf('BUY', lower, chain, asOf),
+    ];
+    const flat = flatLegs(legs);
+    const netDebitMid = flat.reduce((s, l) => s + (l.action === 'BUY' ? l.mid : -l.mid), 0);
+    const netDebitExec = flat.reduce((s, l) => s + (l.action === 'BUY' ? l.ask : -l.bid), 0);
+    if (!(netDebitMid > 0)) { out.unavailable.push(`${name}: no net-debit structure at current quotes`); return; }
+    const costPerContract = +(netDebitMid * mult).toFixed(0);
+    const w2 = body.strike - lower.strike;
+    const horizonDays = daysBetween(asOf, exp * 1000);
+    const scenarios = scenarioPnl(flat, spot, horizonDays, SCENARIO_MOVES, u.dividendYield, mult);
+    const at = (m) => scenarios.find((s) => s.move === m)?.pnl ?? null;
+    const upperBE = upper.strike - netDebitMid;
+    const tail = (width - w2) - netDebitMid; // constant payoff below the lower strike
+    const lowerBE = tail >= 0 ? null : 2 * body.strike - upper.strike + netDebitMid;
+    out.variants.push({
+      key, name, tagline,
+      kind: 'butterfly',
+      legs,
+      netDebit: +netDebitMid.toFixed(2),
+      netDebitExec: +netDebitExec.toFixed(2),
+      costPerContract,
+      maxLoss: costPerContract,
+      maxProfit: +((width - netDebitMid) * mult).toFixed(0),
+      bodyStrike: body.strike,
+      upperStrike: upper.strike,
+      lowerStrike: lower.strike,
+      breakevens: { upper: +upperBE.toFixed(0), lower: lowerBE != null ? +lowerBE.toFixed(0) : null, entryDecline: +(1 - upperBE / spot).toFixed(3) },
+      tailFloor: +(tail * mult).toFixed(0),
+      scenarios,
+      pnlAtMinus20: at(-0.20),
+      pnlAtMinus30: at(-0.30),
+      pnlFlat: at(0),
+      suggestedContracts: 1,
+      allocated: costPerContract,
+      management: [
+        `Payoff is set at the ${out.expiryLabel} expiry — a crash that starts and recovers before expiry (the V-bottom scenario) can still expire worthless.`,
+        'No kill switch or roll: this is a strike bet, not a financed vega position.',
+        u.style === 'european' ? 'European-style: expires cash-settled; no early assignment on the short legs.' : 'American-style: the short body puts can be assigned early if deep ITM.',
+      ],
+      risks: [
+        'Net short vega — IV expansion alone does not help; the index must reach the profit zone by expiry',
+        `Loses 100% of the debit if ${u.label} finishes above ~$${upperBE.toFixed(0)} at expiry`,
+        ...(tail < 0 ? [`Loses the debit below $${(lowerBE ?? lower.strike).toFixed(0)} — a crash that overshoots the tent pays nothing`] : []),
+        'Two extra legs vs a put spread — verify executable prices before entering',
+      ],
+      maxProfitNote: `Max $${((width - netDebitMid) * mult).toFixed(0)} if ${u.label} pins $${body.strike} (${out.expiryLabel}); pays from ~$${upperBE.toFixed(0)} down${tail >= 0 ? `, with a +$${(tail * mult).toFixed(0)} floor below $${lower.strike}` : ` to ~$${(lowerBE ?? 0).toFixed(0)}`}.`,
+      ...extra,
+    });
+  };
+
+  // Symmetric: lower wing the same width below the body
+  mkVariant(body.strike - width, 'symFly', 'Put butterfly (symmetric)',
+    `Targets the −${(t * 100).toFixed(0)}% zone; expires worthless on overshoot`,
+    { karsanFit: 'Cheapest pinpoint bet on the decline, but forfeits everything if the crash overshoots the lower wing.' });
+
+  // Broken-wing: lower wing half-width → keeps a payout floor below the body
+  mkVariant(body.strike - width / 2, 'bwbFly', 'Broken-wing put butterfly',
+    `Same target, but still pays a floor if the crash runs through the body`,
+    { karsanFit: 'Best fit for the 20–40% range: profits on any finish below the upper breakeven, including an overshoot to −40%.' });
+
+  if (out.variants.length === 0 && out.unavailable.length === 0) {
+    out.unavailable.push('Could not construct either butterfly variant at current quotes');
+  }
+  return out;
 }
 
 // ─── Portfolio impact (Principle VII) ────────────────────
@@ -585,11 +755,14 @@ export function buildDebasementPanel(assets = []) {
  * @param {number} p.asOf                     epoch ms (injected for determinism)
  * @param {object} [p.crash]                  /crash/scan payload (incl. .spy)
  * @param {object} [p.volatility]             volatility analysis (vixLevel, termStructure, chart)
- * @param {object[]} [p.chains]               SPY option chains (several expiries)
+ * @param {object[]} [p.chains]               option chains (several expiries) for p.underlying
+ * @param {string|object} [p.underlying]      UNDERLYINGS key ('spy'|'spx'|'xsp') or meta object
  * @param {object[]} [p.debasementAssets]     see buildDebasementPanel
  * @param {number} [p.portfolioValue=500000]
  * @param {number} [p.hedgeBudgetPct=0.02]    annual hedge budget as fraction of portfolio (0–0.10)
  * @param {number} [p.equityExposurePct=0.8]  fraction of portfolio in equities (0–1.5)
+ * @param {number} [p.flyTarget=0.20]         crash-target butterfly decline (fraction, 0.05–0.50)
+ * @param {number|null} [p.flyExpiry]         butterfly expiry (seconds); default = post-midterm cycle
  */
 export function buildCrashThesis(p = {}) {
   const asOf = Number.isFinite(p.asOf) ? p.asOf : 0;
@@ -600,11 +773,13 @@ export function buildCrashThesis(p = {}) {
   const crash = p.crash || null;
   const volatility = p.volatility || null;
   const spy = crash?.spy || null;
+  const underlying = resolveUnderlying(p.underlying);
 
   const phase = computeThesisPhase({ asOf, crash, spy, vixLevel: volatility?.vixLevel ?? null });
   const termIv = buildTermIv(p.chains, asOf);
   const scorecard = buildScorecard({ crash, volatility, spy, termIv });
-  const { trades, unavailable, horizon, spot } = buildCrashTrades({ asOf, chains: p.chains, budget });
+  const { trades, unavailable, horizon, spot } = buildCrashTrades({ asOf, chains: p.chains, budget, underlying });
+  const butterflies = buildButterflies({ asOf, chains: p.chains, underlying, targetDecline: p.flyTarget, expiryTs: p.flyExpiry });
   const impact = portfolioImpact({ trades, portfolioValue, equityExposurePct });
   const totalPremium = trades.reduce((s, t) => s + t.suggestedContracts * t.costPerContract, 0);
   const vBottom = buildVBottomPlan({ phase, crash, vixLevel: volatility?.vixLevel ?? null, vixChart: volatility?.chart });
@@ -636,6 +811,7 @@ export function buildCrashThesis(p = {}) {
   return {
     thesis: KARSAN_THESIS,
     asOf: new Date(asOf).toISOString(),
+    underlying,
     headline,
     phase,
     scorecard,
@@ -643,6 +819,7 @@ export function buildCrashThesis(p = {}) {
     spot: spot ?? null,
     horizon,
     trades,
+    butterflies,
     unavailable,
     sizing: { portfolioValue, hedgeBudgetPct, budget, equityExposurePct },
     portfolioImpact: impact,
@@ -651,7 +828,7 @@ export function buildCrashThesis(p = {}) {
     debasement,
     assumptions: {
       riskFree: RISK_FREE,
-      dividendYield: SPY_DIV_YIELD,
+      dividendYield: underlying.dividendYield,
       volBetaDown: VOL_BETA_DOWN,
       volBetaUp: VOL_BETA_UP,
       note: 'Scenario P&L uses Black-Scholes with a spot-vol shock of +0.8 IV pts per 1% decline (damped for long-dated legs). Approximation for comparing structures, not a price forecast.',

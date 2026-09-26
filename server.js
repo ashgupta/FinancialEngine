@@ -1420,10 +1420,11 @@ app.post('/options/opportunities', async (req, res) => {
 // GLD/FXF/UUP trends) are cached for 1 hour — options quotes go stale faster
 // than the 24h cadence used for daily scans. Sizing params are applied per
 // request by the pure engine, so changing them never refetches data.
-import { buildCrashThesis, KARSAN_THESIS, pickExpiry as pickThesisExpiry } from './src/engine/crashThesis.js';
+import { buildCrashThesis, KARSAN_THESIS, pickExpiry as pickThesisExpiry, UNDERLYINGS, resolveUnderlying } from './src/engine/crashThesis.js';
 import { analyzeAsset } from './src/engine/momentumEngine.js';
 
 let thesisMarketCache = null;
+const thesisChainsCache = new Map(); // symbol -> { chains, expiresAt }
 const THESIS_TTL = 60 * 60_000; // 1 hour
 const DEBASEMENT_ASSETS = [
   { symbol: 'GLD', name: 'SPDR Gold Shares', role: 'Gold' },
@@ -1431,11 +1432,9 @@ const DEBASEMENT_ASSETS = [
   { symbol: 'UUP', name: 'Invesco DB US Dollar Index Bullish', role: 'US dollar (should weaken)', inverse: true },
 ];
 
-async function fetchThesisMarketInputs(refresh) {
-  const { data: crash, volatility } = await getCrashScan({ refresh });
-
-  // SPY chains for the expiries the thesis needs
-  const base = await yahooFinance.options('SPY', {}, { validateResult: false });
+async function fetchThesisChains(symbol) {
+  // Option chains for the expiries the thesis needs, for the given underlying
+  const base = await yahooFinance.options(symbol, {}, { validateResult: false });
   const expirations = (base.expirationDates || []).map((d) => Math.floor(new Date(d).getTime() / 1000));
   const day = 86400000;
   const now = Date.now();
@@ -1456,7 +1455,7 @@ async function fetchThesisMarketInputs(refresh) {
   });
   const chains = (await Promise.all(wanted.map(async (exp) => {
     try {
-      const r = await yahooFinance.options('SPY', { date: new Date(exp * 1000) }, { validateResult: false });
+      const r = await yahooFinance.options(symbol, { date: new Date(exp * 1000) }, { validateResult: false });
       const o = r.options?.[0];
       if (!o) return null;
       return {
@@ -1466,10 +1465,18 @@ async function fetchThesisMarketInputs(refresh) {
         calls: [],
       };
     } catch (err) {
-      console.error(`Thesis chain fetch SPY@${exp} error:`, err?.message || String(err));
+      console.error(`Thesis chain fetch ${symbol}@${exp} error:`, err?.message || String(err));
       return null;
     }
   }))).filter(Boolean);
+
+  return chains;
+}
+
+async function fetchThesisMarketInputs(refresh) {
+  const { data: crash, volatility } = await getCrashScan({ refresh });
+  const day = 86400000;
+  const now = Date.now();
 
   // Debasement trend inputs
   const period1 = new Date(now - 400 * day);
@@ -1487,13 +1494,14 @@ async function fetchThesisMarketInputs(refresh) {
     }
   }));
 
-  return { crash, volatility, chains, debasementAssets, fetchedAt: new Date().toISOString() };
+  return { crash, volatility, debasementAssets, fetchedAt: new Date().toISOString() };
 }
 
 app.get('/thesis/karsan', async (req, res) => {
   const num = (v, d) => (v != null && v !== '' && Number.isFinite(+v) ? +v : d);
   try {
     const refresh = req.query.refresh === '1';
+    const underlying = resolveUnderlying(req.query.underlying);
     if (!thesisMarketCache || thesisMarketCache.expiresAt <= Date.now() || refresh) {
       const inputs = await fetchThesisMarketInputs(refresh);
       thesisMarketCache = { inputs, expiresAt: Date.now() + THESIS_TTL, cached: false };
@@ -1501,21 +1509,34 @@ app.get('/thesis/karsan', async (req, res) => {
       thesisMarketCache.cached = true;
     }
     const { inputs } = thesisMarketCache;
+
+    // Per-underlying option chains, cached separately so switching underlyings
+    // reuses the crash/debasement inputs without refetching them.
+    let chainsEntry = thesisChainsCache.get(underlying.symbol);
+    if (!chainsEntry || chainsEntry.expiresAt <= Date.now() || refresh) {
+      const chains = await fetchThesisChains(underlying.symbol);
+      chainsEntry = { chains, expiresAt: Date.now() + THESIS_TTL };
+      thesisChainsCache.set(underlying.symbol, chainsEntry);
+    }
+
     const result = buildCrashThesis({
       asOf: Date.now(),
       crash: inputs.crash,
       volatility: inputs.volatility,
-      chains: inputs.chains,
+      chains: chainsEntry.chains,
+      underlying,
       debasementAssets: inputs.debasementAssets,
       portfolioValue: num(req.query.portfolio, 500000),
       hedgeBudgetPct: num(req.query.budget, 0.02),
       equityExposurePct: num(req.query.equity, 0.8),
+      flyTarget: num(req.query.flyTarget, 0.20),
+      flyExpiry: req.query.flyExpiry != null && req.query.flyExpiry !== '' ? parseInt(req.query.flyExpiry, 10) : null,
     });
     res.json({
       ...result,
       fetchedAt: inputs.fetchedAt,
       cached: thesisMarketCache.cached,
-      source: 'Yahoo Finance (SPY options, ^VIX/^VIX3M curve, GLD/FXF/UUP) + CFTC COT via Crash Radar',
+      source: `Yahoo Finance (${underlying.symbol} options, ^VIX/^VIX3M curve, GLD/FXF/UUP) + CFTC COT via Crash Radar`,
     });
   } catch (err) {
     console.error('Crash thesis error:', err.message);
