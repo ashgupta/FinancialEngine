@@ -79,6 +79,15 @@ function loadState() {
 
 const FIDELITY_SEED_KEY = 'windsurf_fidelity_watchlist_seeded_v1';
 
+// User-requested additions (momentum ETF + treasury ladder legs), merged into
+// the active list once — same pattern as the Fidelity seed above.
+const MOMENTUM_TREASURY_SEED_KEY = 'windsurf_momentum_treasury_seeded_v1';
+const MOMENTUM_TREASURY_WATCHLIST = [
+  { symbol: 'SPMO', name: 'Invesco S&P 500 Momentum ETF', group: 'ETF' },
+  { symbol: 'IEF', name: 'iShares 7-10 Year Treasury ETF', group: 'ETF' },
+  { symbol: 'SGOV', name: 'iShares 0-3 Month Treasury', group: 'ETF' },
+];
+
 const WatchlistContext = createContext();
 
 export function WatchlistProvider({ children }) {
@@ -112,6 +121,28 @@ export function WatchlistProvider({ children }) {
         };
       });
       localStorage.setItem(FIDELITY_SEED_KEY, '1');
+    } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // One-time merge of SPMO/IEF/SGOV into whichever list is active.
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(MOMENTUM_TREASURY_SEED_KEY)) return;
+      setState(prev => {
+        const target = prev.active;
+        const existing = prev.lists[target] ?? [];
+        const seen = new Set(existing.map(w => w.symbol));
+        const merged = [...existing];
+        for (const s of MOMENTUM_TREASURY_WATCHLIST) {
+          if (!seen.has(s.symbol)) {
+            seen.add(s.symbol);
+            merged.push(s);
+          }
+        }
+        return { ...prev, lists: { ...prev.lists, [target]: merged } };
+      });
+      localStorage.setItem(MOMENTUM_TREASURY_SEED_KEY, '1');
     } catch { /* ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
