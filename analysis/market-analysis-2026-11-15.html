@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>US Markets Deep Analysis — Nov 15, 2026</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --panel2: #273449; --text: #e2e8f0; --muted: #94a3b8;
+    --green: #34d399; --red: #f87171; --amber: #fbbf24; --blue: #60a5fa; --border: #334155;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--text); line-height: 1.55; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 32px 20px 64px; }
+  header { border-bottom: 1px solid var(--border); padding-bottom: 20px; margin-bottom: 24px; }
+  h1 { margin: 0 0 6px; font-size: 30px; }
+  h2 { margin: 40px 0 14px; font-size: 22px; border-left: 4px solid var(--blue); padding-left: 10px; }
+  h3 { margin: 20px 0 8px; font-size: 17px; color: var(--blue); }
+  .sub { color: var(--muted); font-size: 14px; }
+  .verdict { background: linear-gradient(135deg, #1e3a5f, #1e293b); border: 1px solid #2c5282;
+             border-radius: 12px; padding: 18px 22px; margin: 20px 0; font-size: 16px; }
+  .verdict strong { color: var(--amber); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .card .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  .card .v { font-size: 26px; font-weight: 700; margin: 4px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0 6px; font-size: 14px;
+          background: var(--panel); border-radius: 10px; overflow: hidden; }
+  th, td { padding: 9px 11px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--panel2); color: var(--muted); font-weight: 600; font-size: 12px;
+       text-transform: uppercase; letter-spacing: .04em; }
+  tr:last-child td { border-bottom: none; }
+  .pos { color: var(--green); font-weight: 600; }
+  .neg { color: var(--red); font-weight: 600; }
+  .warn { color: var(--amber); font-weight: 600; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .p-green { background: #064e3b; color: var(--green); }
+  .p-red { background: #7f1d1d; color: #fecaca; }
+  .p-amber { background: #78350f; color: #fde68a; }
+  .p-blue { background: #1e3a8a; color: #bfdbfe; }
+  ul { padding-left: 22px; margin: 8px 0; }
+  li { margin: 4px 0; }
+  .gauge { display: flex; align-items: center; gap: 18px; }
+  .bar { flex: 1; height: 14px; border-radius: 7px; position: relative;
+         background: linear-gradient(90deg, #10b981 0%, #84cc16 25%, #fbbf24 50%, #f97316 75%, #ef4444 100%); }
+  .marker { position: absolute; top: -6px; width: 4px; height: 26px; background: #fff; border-radius: 2px; }
+  .note { background: var(--panel); border-left: 4px solid var(--amber); padding: 12px 16px;
+          border-radius: 6px; margin: 14px 0; font-size: 14px; }
+  .alloc { display: flex; height: 34px; border-radius: 8px; overflow: hidden; margin: 12px 0; font-size: 12px; font-weight: 600; }
+  .alloc div { display: flex; align-items: center; justify-content: center; color: #0f172a; }
+  footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+  @media print { body { background: #fff; color: #000; } .card, table, .note, .verdict { background: #fff; color: #000; border-color: #ccc; } th { background: #eee; color: #333; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>US Markets Deep Analysis</h1>
+  <div class="sub">Stocks · LEAPS · Gold · Bitcoin · Ethereum · AI · Healthcare &nbsp;|&nbsp; Data as of <strong>Sunday, Nov 15, 2026</strong> (live Yahoo quotes via WealthEngine + recent news)</div>
+</header>
+
+<div class="verdict">
+  <strong>Bottom line:</strong> Lean <strong>moderately conservative for the next 4–8 weeks</strong>. Scale into index shares gradually rather than buying LEAPS now.
+  Valuations have improved, but LEAPS are expensive (high implied volatility plus 5% rates), and two catalysts are still ahead:
+  <strong>Nvidia earnings (Nov 17)</strong> and the <strong>Fed meeting (Dec 9)</strong>.
+</div>
+
+<!-- ============ 1. SNAPSHOT ============ -->
+<h2>1. Market Snapshot</h2>
+
+<div class="grid">
+  <div class="card"><div class="k">S&amp;P 500 (SPY)</div><div class="v">$754</div><div class="sub"><span class="pos">+3.1%</span> vs 200-day · −3.5% from high</div></div>
+  <div class="card"><div class="k">Nasdaq-100 (QQQ)</div><div class="v">$680</div><div class="sub"><span class="warn">−0.3%</span> vs 200-day · −10.9% from high</div></div>
+  <div class="card"><div class="k">10-yr Treasury</div><div class="v">5.15%</div><div class="sub">Highest in ~3 weeks</div></div>
+  <div class="card"><div class="k">VIX</div><div class="v">19.3</div><div class="sub">Normal range</div></div>
+</div>
+
+<h3>Crash Radar (WealthEngine): 20.7 / 100 — Calm</h3>
+<div class="card">
+  <div class="gauge">
+    <div class="bar"><div class="marker" style="left:20.7%"></div></div>
+    <span class="pill p-green">CALM</span>
+  </div>
+  <table style="margin-top:14px">
+    <tr><th>Factor</th><th>Reading</th><th>Contribution</th></tr>
+    <tr><td>VIX level</td><td>19.3, normal range</td><td>3.8</td></tr>
+    <tr><td>VIX term structure</td><td>Contango (VIX3M 20.6 &gt; VIX 19.3), calming</td><td>0.5</td></tr>
+    <tr><td>SPY vs 200-day</td><td>+3.1%, trend intact</td><td>5.5</td></tr>
+    <tr><td>Sector breadth</td><td class="warn">33% of sectors below 200-day (mixed)</td><td>5.0</td></tr>
+    <tr><td>Momentum</td><td class="warn">Positive but fading (2.9)</td><td>4.3</td></tr>
+    <tr><td>Drawdown from 52-wk high</td><td>3.5%, near highs</td><td>1.5</td></tr>
+    <tr><td>COT positioning</td><td>Large futures traders net +54K, adding longs</td><td>0.0</td></tr>
+  </table>
+</div>
+
+<h3>Asset Dashboard</h3>
+<table>
+  <tr><th>Asset</th><th>Price</th><th>From 52-wk high</th><th>vs 200-day</th><th>Read</th></tr>
+  <tr><td>S&amp;P 500 (SPY)</td><td>$754.37</td><td>−3.5%</td><td class="pos">+3.1%</td><td>Uptrend intact</td></tr>
+  <tr><td>Nasdaq-100 (QQQ / QQQM)</td><td>$679.89 / $279.97</td><td class="neg">−10.9%</td><td class="warn">−0.3%</td><td>On the trend line; AI dragging it down</td></tr>
+  <tr><td>Gold (GLD)</td><td>$355 (spot ~$3,890/oz)</td><td class="neg">−30.3%</td><td class="neg">−13.0%</td><td>Clear downtrend</td></tr>
+  <tr><td>Bitcoin</td><td>$65,126</td><td class="neg">−33.5%</td><td class="neg">−10.8%</td><td>Downtrend; ETFs net sellers 6 days</td></tr>
+  <tr><td>Ethereum</td><td>$1,818</td><td class="neg">−47.2%</td><td class="neg">−15.2%</td><td>Weaker than Bitcoin</td></tr>
+  <tr><td>10-yr Treasury yield</td><td>5.15%</td><td>—</td><td>—</td><td>Highest in ~3 weeks</td></tr>
+  <tr><td>3-month T-bill yield</td><td>4.12%</td><td>—</td><td>—</td><td>Rising with hike expectations</td></tr>
+  <tr><td>US Dollar Index</td><td>103.4</td><td>At 52-wk high</td><td class="pos">+3.5%</td><td>Highest since Apr 2025</td></tr>
+</table>
+
+<h3>What's driving markets</h3>
+<ul>
+  <li><strong>Rate hikes are coming.</strong> October CPI was hot (headline +0.4%, core +0.3% for the 3rd straight month). Prediction markets price an <strong>~87% chance of a 25bp hike on Dec 9</strong> (~10% for 50bp), with more possible into early 2027. Fed funds would go from 3.75–4.00% toward ~4.4%.</li>
+  <li><strong>AI stocks in correction.</strong> Worries about AI companies borrowing heavily for data centers, fears that the Democratic midterm sweep limits data-center construction, and <strong>Jensen Huang's resignation as Nvidia CEO (Nov 12)</strong>. Nasdaq fell 5.5% on Nov 5; Nvidia is down 6 straight weeks.</li>
+  <li><strong>Gold and crypto falling with real yields.</strong> With bonds paying 5%, assets that pay nothing lose appeal, and the strong dollar adds pressure.</li>
+</ul>
+
+<!-- ============ 2. VALUATION ============ -->
+<h2>2. Are P/E Ratios Really Low?</h2>
+<p><strong>Partly true, but misleading on its own.</strong></p>
+<table>
+  <tr><th>Measure</th><th>Now</th><th>Comparison</th></tr>
+  <tr><td>Forward P/E (FactSet, Nov 5)</td><td><strong>17.7</strong></td><td class="pos">Below 5-yr (19.8) and 10-yr (19.1) averages; lowest since 2023</td></tr>
+  <tr><td>Trailing 12-month P/E</td><td>24.7</td><td class="neg">Above 10-yr average (23.7)</td></tr>
+  <tr><td>Shiller CAPE</td><td>39.9</td><td class="neg">More than 2× long-run average (17.5)</td></tr>
+  <tr><td>Earnings yield vs 10-yr Treasury</td><td>5.65% vs 5.15%</td><td class="neg">Only ~0.5% extra return for owning stocks; unusually thin</td></tr>
+</table>
+<div class="note">
+  The forward P/E is low because analysts expect very strong earnings: <strong>+33% in 2026 and +16% in 2027</strong>, much of it tied to AI spending.
+  If data-center spending slows (policy limits, financing pressure), those estimates fall and the "cheap" P/E becomes less cheap.
+  <br><strong>Verdict:</strong> valuations are reasonable, not cheap. They support buying gradually, not making a big leveraged bet.
+</div>
+
+<!-- ============ 3. LEAPS ============ -->
+<h2>3. LEAPS on QQQM or the S&amp;P 500?</h2>
+<p>Live quotes for calls expiring <strong>Dec 15, 2028</strong> (~25 months out):</p>
+<table>
+  <tr><th>Contract</th><th>Bid / Ask</th><th>Mid cost</th><th>Rise needed to break even</th><th>Implied vol</th><th>Open interest</th></tr>
+  <tr><td>SPY 680 (deep ITM)</td><td>161.50 / 166.21</td><td>$164</td><td>+11.9%</td><td>30.6%</td><td>675</td></tr>
+  <tr><td>SPY 755 (at the money)</td><td>111.53 / 116.00</td><td>$114 (15% of SPY)</td><td class="warn">+15.2%</td><td>26.9%</td><td>1,093</td></tr>
+  <tr><td>QQQ 610 (deep ITM)</td><td>167.57 / 171.44</td><td>$170</td><td>+14.7%</td><td>36.4%</td><td>564</td></tr>
+  <tr><td>QQQ 680 (at the money)</td><td>125.16 / 129.02</td><td>$127</td><td class="neg">+18.7%</td><td>33.2%</td><td>213</td></tr>
+  <tr><td>QQQM 250</td><td>68.50 / 73.00</td><td>$70.75</td><td>+14.6%</td><td>37.6%</td><td class="neg">58</td></tr>
+  <tr><td>QQQM 280 (at the money)</td><td>50.00 / 55.00</td><td>$52.50</td><td class="neg">+18.8%</td><td>34.4%</td><td class="neg">25</td></tr>
+</table>
+
+<h3>Why not buy them right now</h3>
+<ul>
+  <li><strong>Expensive:</strong> 27% (SPY) and 33% (QQQ) implied volatility for 2-year options is high; calm markets are typically high-teens to low-20s. <strong>5% rates also raise call prices</strong> because the option price includes ~2 years of financing cost.</li>
+  <li><strong>Big downside in a correction:</strong> estimated that if SPY fell 15% over 6 months, the at-the-money SPY LEAP would lose about <strong>40–50%</strong>, breaking WealthEngine's 15% drawdown guard.</li>
+  <li><strong>QQQM options are too illiquid:</strong> ~$5 bid-ask spread on a ~$70 option (7%) and only 25–58 contracts of open interest. Use <strong>QQQ</strong> for Nasdaq LEAPS.</li>
+  <li><strong>Timing:</strong> Nvidia (~8% of the S&amp;P, more of the Nasdaq) reports Nov 17, the Fed meets Dec 9, and QQQ sits right on its 200-day average.</li>
+</ul>
+
+<h3>If you still want LEAPS</h3>
+<ul>
+  <li>Choose <strong>SPY over QQQ</strong>: healthier trend, less AI concentration.</li>
+  <li>Use <strong>deep in-the-money strikes (~80% of price, ~0.80 delta)</strong>: less of the price is decaying time value.</li>
+  <li>Keep it to <strong>5–10% of the portfolio</strong>, bought in <strong>2–3 tranches after Dec 9</strong>.</li>
+  <li><strong>Cheaper alternative:</strong> a LEAPS <strong>bull call spread</strong> (buy one call, sell a higher one). Costs less and is less hurt by high implied volatility.</li>
+</ul>
+
+<!-- ============ 4. POSITIONING ============ -->
+<h2>4. Should You Be More Conservative?</h2>
+<p><strong>Yes, moderately: a barbell rather than all-in.</strong> Illustrative split; adjust to your age, goals and risk tolerance.</p>
+<div class="alloc">
+  <div style="width:30%;background:#60a5fa">Cash/T-bills 30%</div>
+  <div style="width:45%;background:#34d399">Core index 45%</div>
+  <div style="width:12%;background:#a78bfa">AI 12%</div>
+  <div style="width:8%;background:#f472b6">Health 8%</div>
+  <div style="width:3%;background:#fbbf24"></div>
+  <div style="width:2%;background:#fb923c"></div>
+</div>
+<table>
+  <tr><th>Bucket</th><th>Share</th><th>What to hold</th></tr>
+  <tr><td>Cash &amp; short Treasuries</td><td>25–35%</td><td><strong>SGOV / T-bills</strong> (~4.1% and rising with each hike). Dry powder for buying a dip.</td></tr>
+  <tr><td>Core stocks (shares, not options)</td><td>40–50%</td><td>VOO/SPY with some QQQ. <strong>Buy monthly over 3–6 months.</strong></td></tr>
+  <tr><td>Quality AI &amp; selective stocks</td><td>10–15%</td><td>See section 6</td></tr>
+  <tr><td>Healthcare</td><td>5–10%</td><td>See section 7</td></tr>
+  <tr><td>Gold</td><td>0–5%</td><td>Hold, don't add yet</td></tr>
+  <tr><td>Crypto</td><td>0–3%</td><td>Only money you can afford to lose entirely</td></tr>
+</table>
+<div class="note"><strong>Bonds:</strong> a 5.15% 10-year yield is attractive for locking in income, but more hikes could push yields higher first. Build a <strong>2–5 year Treasury ladder gradually</strong> instead of buying long bonds all at once.</div>
+
+<!-- ============ 5. GOLD / CRYPTO ============ -->
+<h2>5. Gold, Bitcoin, Ethereum</h2>
+<div class="grid">
+  <div class="card">
+    <h3 style="margin-top:0">Gold <span class="pill p-amber">HOLD</span></h3>
+    <p>Down ~30% from ~$5,600 in January, driven by real yields and the dollar. Hikes keep that pressure on, so don't try to catch the bottom. For a long-term hedge, <strong>add slowly after the Fed meeting</strong>, and only once gold is back above its 50-day average.</p>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">Bitcoin <span class="pill p-red">DON'T ADD</span></h3>
+    <p>Bear trend: −33% YTD, 6 straight days of ETF outflows (~$1.44B), $1.6B of forced liquidations in one day, weakest demand reading since Dec 2023.</p>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">Ethereum <span class="pill p-red">DON'T ADD</span></h3>
+    <p>−47% from high, broke below $2,000, weaker than Bitcoin. If you believe long-term, small monthly purchases sized so a further 50% drop wouldn't matter.</p>
+  </div>
+</div>
+
+<!-- ============ 6. AI ============ -->
+<h2>6. Nvidia, CoreWeave, Oracle &amp; Other AI Stocks</h2>
+<table>
+  <tr><th>Stock</th><th>Price</th><th>From high</th><th>Fwd P/E</th><th>Verdict</th></tr>
+  <tr><td><strong>NVIDIA (NVDA)</strong></td><td>$162.85</td><td class="neg">−33%</td><td>10.3</td>
+      <td><span class="pill p-amber">WATCH / SMALL AFTER EARNINGS</span><br>Cheap on numbers, but leadership risk (interim CEO Colette Kress), worries it funds its own customers, 10+ analyst downgrades. <strong>Earnings Nov 17 is a coin flip</strong>; if guidance holds, start a 1–2% position.</td></tr>
+  <tr><td><strong>CoreWeave (CRWV)</strong></td><td>$53.13</td><td class="neg">−62%</td><td>Losing money</td>
+      <td><span class="pill p-red">AVOID</span><br>Debt priced as distressed (bonds ~15.8% yield, credit insurance ~11.4%/yr). Gartner predicts 80%+ of neoclouds won't survive independently by 2030. A lottery ticket, not an investment.</td></tr>
+  <tr><td><strong>Oracle (ORCL)</strong></td><td>$125.35</td><td class="neg">−50%</td><td>11.3</td>
+      <td><span class="pill p-red">HIGH RISK / PASS FOR NOW</span><br>~$135B debt, burning cash until 2H FY2028, just <strong>sold new shares at $116</strong> plus bonds at 7–8.65%. Big upside if FY2030 targets ($225B revenue, $21+ EPS) are met, but the balance sheet is the weak point if rates keep rising.</td></tr>
+</table>
+
+<h3>Better AI options</h3>
+<table>
+  <tr><th>Rank</th><th>Stock</th><th>Price</th><th>From high</th><th>vs 200-day</th><th>Fwd P/E</th><th>Why</th></tr>
+  <tr><td>1</td><td><strong>Microsoft (MSFT)</strong></td><td>$523.88</td><td>−6%</td><td class="pos">+18.7%</td><td>21.7</td><td>Strong balance sheet; "the AI adults in the room." <strong>Top pick.</strong></td></tr>
+  <tr><td>2</td><td>Alphabet (GOOGL)</td><td>$295.77</td><td class="neg">−28%</td><td class="neg">−12.6%</td><td>19.2</td><td>Cheap for its quality; buy gradually</td></tr>
+  <tr><td>2</td><td>TSMC (TSM)</td><td>$398.73</td><td>−18%</td><td>−1.1%</td><td>17.1</td><td>Makes chips for nearly every AI company</td></tr>
+  <tr><td>4</td><td>Broadcom (AVGO)</td><td>$347.01</td><td class="neg">−30%</td><td>−5.6%</td><td>17.9</td><td>Custom AI chips; rose ~6% on the Nvidia news</td></tr>
+  <tr><td>5</td><td>Meta (META)</td><td>$641.69</td><td>−18%</td><td class="pos">+1.7%</td><td>18.1</td><td>Above its 200-day average</td></tr>
+  <tr><td>—</td><td>AMD</td><td>$534.06</td><td>−19%</td><td class="pos">+26.2%</td><td>30.2 (trailing 114)</td><td>Strong momentum but stretched; don't chase</td></tr>
+</table>
+<p><strong>Overall ranking:</strong> MSFT &gt; GOOGL ≈ TSM &gt; AVGO &gt; META &gt; NVDA (after earnings) &gt; ORCL &gt;&gt; CRWV</p>
+
+<!-- ============ 7. HEALTHCARE ============ -->
+<h2>7. Healthcare: Novo Nordisk or UnitedHealth?</h2>
+<table>
+  <tr><th></th><th>UnitedHealth (UNH) <span class="pill p-green">PREFERRED</span></th><th>Novo Nordisk (NVO) <span class="pill p-blue">VALUE / SMALLER</span></th></tr>
+  <tr><td>Price / trend</td><td>$407.46, <span class="pos">+11.2% above 200-day</span>, −11.7% from high</td><td>$41.63, <span class="neg">−3.6% below 200-day</span>, −35% from high</td></tr>
+  <tr><td>Valuation</td><td>Fwd P/E 17.5</td><td>Trailing P/E 10.5, <strong>dividend ~3.2%</strong></td></tr>
+  <tr><td>Story</td><td><strong>Raised guidance 3× this year.</strong> 2026 EPS ≥ $20.50; 2027 targeting 13–16% growth. Medical cost ratio improving to 88.4%.</td><td>Raised guidance; Wegovy pill launch strong; CagriSema expected 2027. <strong>But 2026 sales roughly flat</strong> and still losing share to Lilly.</td></tr>
+  <tr><td>Risks</td><td>Policy and legal risk (Democratic Congress), shrinking membership</td><td>Lost patent protection, China, US price pressure</td></tr>
+</table>
+<div class="note">If you pick one, choose <strong>UnitedHealth</strong>: better momentum, rising estimates, recovery underway (support ~$380–395). <strong>Novo</strong> is a cheaper, higher-dividend value play for a smaller, patient position. The stronger obesity-drug company is <strong>Eli Lilly (LLY, $1,443.50)</strong>, but at fwd P/E 28.5 and near its all-time high it isn't cheap.</div>
+
+<!-- ============ 8. ACTION PLAN ============ -->
+<h2>8. Action Plan</h2>
+<table>
+  <tr><th>When</th><th>What to do</th></tr>
+  <tr><td><strong>Now</strong></td><td>Put new cash in <strong>SGOV</strong>. Start <strong>monthly VOO/SPY share purchases</strong>. Small first buys of <strong>MSFT and GOOGL</strong>.</td></tr>
+  <tr><td><strong>After Nov 17</strong> (Nvidia earnings)</td><td>If guidance holds, start a small <strong>NVDA</strong> position. If it disappoints, expect AI to fall further: an opportunity for the cash reserve.</td></tr>
+  <tr><td><strong>After Dec 9</strong> (Fed meeting)</td><td>If 25bp and the Fed signals the cycle is ending: consider <strong>deep-ITM SPY LEAPS or a LEAPS bull call spread (5–10%)</strong> in tranches. If 50bp or more hikes signaled: stay defensive longer.</td></tr>
+  <tr><td><strong>Ongoing</strong></td><td>Add <strong>UNH</strong> on dips (~$380–395). Hold gold and crypto. Check <strong>Crash Radar</strong> weekly: <strong>if it moves above 40 ("Elevated"), pause new risk.</strong></td></tr>
+</table>
+
+<h3>Signs it's safe to get more aggressive</h3>
+<ul>
+  <li>QQQ back above its 200-day average</li>
+  <li>10-year yield clearly below 5%</li>
+  <li>Fed signals the end of hikes</li>
+  <li>More sectors moving above their 200-day averages</li>
+</ul>
+
+<!-- ============ KEY DATES ============ -->
+<h2>Key Dates</h2>
+<div class="grid">
+  <div class="card"><div class="k">Tue, Nov 17</div><div class="v" style="font-size:20px">Nvidia Q3 earnings</div><div class="sub">First report under interim CEO Kress</div></div>
+  <div class="card"><div class="k">Wed, Dec 9</div><div class="v" style="font-size:20px">FOMC decision</div><div class="sub">~87% odds of 25bp hike</div></div>
+  <div class="card"><div class="k">Jan 27 &amp; Mar 17, 2027</div><div class="v" style="font-size:20px">Next FOMC meetings</div><div class="sub">~59–60% odds of a further hike each</div></div>
+</div>
+
+<footer>
+  <p><strong>Sources:</strong> Live quotes and option chains from Yahoo Finance via WealthEngine (Nov 15, 2026); WealthEngine Crash Radar; FactSet Earnings Insight (Nov 6 &amp; 9, 2026); Kalshi / Polymarket / CME FedWatch rate odds; Reuters, CNBC, Yahoo Finance, Fortune, CoinDesk reporting on Nvidia, Oracle, CoreWeave, Novo Nordisk, UnitedHealth, gold and crypto (Nov 2026).</p>
+  <p><strong>Disclaimer:</strong> For educational purposes only; not personalized investment advice. Options and crypto involve substantial risk of loss. Allocations shown are illustrative and should be adjusted to your age, goals, timeline and risk tolerance. Verify prices before trading.</p>
+</footer>
+
+</div>
+</body>
+</html>
