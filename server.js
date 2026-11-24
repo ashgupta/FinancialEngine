@@ -185,6 +185,49 @@ app.get('/yf/options/:symbol', async (req, res) => {
   }
 });
 
+// ─── Options-implied distribution (Breeden–Litzenberger) ─
+// GET /options/distribution/:symbol[?date=<expiry unix s>] (default ≈30 DTE) → summary, density
+// curve and smile for one expiry. Pure math lives in impliedDistribution.js.
+import { buildImpliedDistribution, distributionSummary, distributionCurve } from './src/engine/impliedDistribution.js';
+
+app.get('/options/distribution/:symbol', async (req, res) => {
+  try {
+    const { symbol } = req.params;
+    if (!validateSymbol(symbol)) return res.status(400).json({ error: 'Invalid symbol' });
+    const { date } = req.query;
+    if (date && (isNaN(parseInt(date)) || parseInt(date) < 0)) return res.status(400).json({ error: 'Invalid date' });
+    let result = await yahooFinance.options(symbol, date ? { date: new Date(parseInt(date) * 1000) } : {}, { validateResult: false });
+    if (!date) {
+      // Default expiry: nearest to 30 days out (≥7d) — 0–2 DTE chains are too short to read a distribution from.
+      const target = Date.now() + 30 * 86400000;
+      const exps = (result.expirationDates || []).map((d) => new Date(d).getTime()).filter((t) => t >= Date.now() + 7 * 86400000);
+      const pick = exps.reduce((a, t) => (a == null || Math.abs(t - target) < Math.abs(a - target) ? t : a), null);
+      if (pick) result = await yahooFinance.options(symbol, { date: new Date(pick) }, { validateResult: false });
+    }
+    const o = result.options?.[0];
+    const spot = result.quote?.regularMarketPrice ?? 0;
+    if (!o || !(spot > 0)) return res.status(404).json({ error: 'No option chain' });
+    const expiry = Math.floor(new Date(o.expirationDate).getTime() / 1000);
+    const dte = (expiry * 1000 - Date.now()) / 86400000;
+    const q = (c) => ({ strike: c.strike, bid: c.bid ?? 0, ask: c.ask ?? 0 });
+    const dist = buildImpliedDistribution({ calls: (o.calls || []).map(q), puts: (o.puts || []).map(q), spot, daysToExpiry: dte });
+    res.json({
+      symbol,
+      name: result.quote?.shortName || symbol,
+      expiry,
+      expirations: (result.expirationDates || []).map((d) => Math.floor(new Date(d).getTime() / 1000)),
+      summary: distributionSummary(dist),
+      curve: distributionCurve(dist, 80),
+      smile: dist?.smilePoints ?? [],
+      fetchedAt: new Date().toISOString(),
+      source: 'Yahoo Finance option chain; Breeden–Litzenberger density (risk-neutral)',
+    });
+  } catch (err) {
+    console.error(`Distribution error (${req.params.symbol}):`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Google Finance quote endpoint (secondary source) ────
 // Google Finance has no official API; this extracts price from the public quote page.
 // Used as a fallback when Yahoo Finance is unavailable or returns no data.
@@ -1494,7 +1537,19 @@ async function fetchThesisMarketInputs(refresh) {
     }
   }));
 
-  return { crash, volatility, debasementAssets, fetchedAt: new Date().toISOString() };
+  // Credit-spread proxy inputs (HYG ÷ IEF), see computeCreditStress.
+  const closesFor = async (symbol) => {
+    try {
+      const r = await yahooFinance.chart(symbol, { period1, interval: '1d' }, { validateResult: false });
+      return (r.quotes || []).filter((x) => x.close != null).map((x) => x.adjclose ?? x.close);
+    } catch (err) {
+      console.error(`Credit input ${symbol} error:`, err?.message || String(err));
+      return [];
+    }
+  };
+  const [hyg, ief] = await Promise.all([closesFor('HYG'), closesFor('IEF')]);
+
+  return { crash, volatility, debasementAssets, creditInputs: { hyg, ief }, fetchedAt: new Date().toISOString() };
 }
 
 app.get('/thesis/karsan', async (req, res) => {
@@ -1526,6 +1581,7 @@ app.get('/thesis/karsan', async (req, res) => {
       chains: chainsEntry.chains,
       underlying,
       debasementAssets: inputs.debasementAssets,
+      creditInputs: inputs.creditInputs,
       portfolioValue: num(req.query.portfolio, 500000),
       hedgeBudgetPct: num(req.query.budget, 0.02),
       equityExposurePct: num(req.query.equity, 0.8),
@@ -1536,7 +1592,7 @@ app.get('/thesis/karsan', async (req, res) => {
       ...result,
       fetchedAt: inputs.fetchedAt,
       cached: thesisMarketCache.cached,
-      source: `Yahoo Finance (${underlying.symbol} options, ^VIX/^VIX3M curve, GLD/FXF/UUP) + CFTC COT via Crash Radar`,
+      source: `Yahoo Finance (${underlying.symbol} options, ^VIX/^VIX3M curve, GLD/FXF/UUP, HYG/IEF credit proxy) + CFTC COT via Crash Radar`,
     });
   } catch (err) {
     console.error('Crash thesis error:', err.message);

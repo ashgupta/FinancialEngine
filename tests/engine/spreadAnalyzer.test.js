@@ -484,3 +484,61 @@ describe('analyzeSpreads — LEAPS horizons', () => {
     expect(r.every(c => c.netCost < 0)).toBe(true);   // credit received
   });
 });
+
+// ── Implied-distribution PoP (Breeden–Litzenberger) ───────────────────
+import { black76, buildImpliedDistribution, probAbove, probBelow } from '../../src/engine/impliedDistribution.js';
+
+describe('analyzeSpreads — implied distribution', () => {
+  const R = 0.043, DTE = 120, T = DTE / 365, S = 100, F = S * Math.exp(R * T);
+  // Put-skewed chain: crash tail priced rich.
+  const vol = (k) => Math.max(0.12, 0.30 - 0.45 * Math.log(k / F) + 0.6 * Math.log(k / F) ** 2);
+  const mk = (isCall) => {
+    const out = [];
+    for (let k = 60; k <= 150; k += 5) {
+      const p = black76(F, k, T, vol(k), isCall, R);
+      out.push(opt(k, +(p * 0.99).toFixed(3), +(p * 1.01).toFixed(3), vol(k)));
+    }
+    return out;
+  };
+  const calls = mk(true);
+  const puts = mk(false);
+  const dist = buildImpliedDistribution({ calls, puts, spot: S, daysToExpiry: DTE, riskFreeRate: R });
+  const base = { calls, puts, underlyingPrice: S, daysToExpiry: DTE, maxWidth: 10 };
+
+  it('uses the implied distribution for PoP when supplied', () => {
+    const c = analyzeSpreads({ ...base, spreadType: 'bull_call', distribution: dist });
+    expect(c.length).toBeGreaterThan(0);
+    for (const x of c.slice(0, 10)) {
+      expect(x.popMethod).toBe('implied');
+      expect(x.probabilityOfProfit).toBeCloseTo(probAbove(dist, x.breakeven), 3);
+      expect(x.popLognormal).toBeGreaterThan(0);
+    }
+  });
+
+  it('fairly priced spreads have ≈ zero implied expected value (vs biased lognormal EV)', () => {
+    const c = analyzeSpreads({ ...base, spreadType: 'bull_put', distribution: dist });
+    // EV per contract relative to the strike width (deep-ITM spreads have tiny
+    // max loss, so % of risk is not a stable yardstick).
+    const maxAbsEvPctOfWidth = Math.max(...c.map((x) => Math.abs(x.expectedValue) / (x.width * 100)));
+    expect(maxAbsEvPctOfWidth).toBeLessThan(0.02);
+  });
+
+  it('reports tail probabilities of max profit and max loss', () => {
+    const c = analyzeSpreads({ ...base, spreadType: 'bear_put', distribution: dist })[0];
+    expect(c.probMaxProfit).toBeCloseTo(probBelow(dist, c.shortLeg.strike), 2);
+    expect(c.probMaxLoss).toBeCloseTo(probAbove(dist, c.longLeg.strike), 2);
+    expect(c.probMaxProfit + c.probMaxLoss).toBeLessThanOrEqual(1);
+  });
+
+  it('falls back to lognormal when no distribution or the expiry does not match (boundary)', () => {
+    const a = analyzeSpreads({ ...base, spreadType: 'bull_call' })[0];
+    expect(a.popMethod).toBe('lognormal');
+    const b = analyzeSpreads({ ...base, spreadType: 'bull_call', distribution: { ...dist, daysToExpiry: DTE + 30 } })[0];
+    expect(b.popMethod).toBe('lognormal');
+  });
+
+  it('invalid distribution input is ignored', () => {
+    const a = analyzeSpreads({ ...base, spreadType: 'bull_call', distribution: { foo: 1 } })[0];
+    expect(a.popMethod).toBe('lognormal');
+  });
+});

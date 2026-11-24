@@ -38,12 +38,22 @@
  * return FEWER than 5 picks (or none). We never pad with low-quality trades.
  *
  * Every recommendation has a `why` object with:
- *   signalSummary, strikeReason, horizonReason, riskNote
+ *   signalSummary, strikeReason, horizonReason, riskNote, distributionNote
+ *
+ * Options-implied distribution (Breeden–Litzenberger, impliedDistribution.js):
+ * each chain's own prices define the probability density used for PoP,
+ * expected value and tail odds — skew and fat tails included — instead of a
+ * single-vol lognormal. The PoP gates above therefore test the trade against
+ * what the market is pricing. Each rec carries `impliedDistribution` (shape,
+ * tails, 90% range) and a shape-aware note (e.g. selling a fat crash tail).
+ * Chains with too few quoted strikes fall back to the lognormal estimate
+ * (`popMethod: 'lognormal'`).
  */
 
 import { analyzeAsset } from './momentumEngine.js';
 import { analyzeSpreads } from './spreadAnalyzer.js';
 import { bsCallDelta, bsCallPrice } from './leapsAnalyzer.js';
+import { buildImpliedDistribution, distributionSummary, probAbove, probBelow } from './impliedDistribution.js';
 
 // ─── Constants ───────────────────────────────────────────
 
@@ -273,6 +283,67 @@ function pickCallByDelta(calls, spot, dte, targetDelta) {
 
 // ─── Strategy builders ───────────────────────────────────
 
+// ─── Options-implied distribution per chain ──────────────
+
+const distCache = new WeakMap();
+
+/** Implied distribution for a chain's expiry (memoised per chain object). */
+function chainDistribution(chain) {
+  if (!chain || typeof chain !== 'object') return null;
+  if (distCache.has(chain)) return distCache.get(chain);
+  const dte = daysToExpiration(chain.expirationDate);
+  const dist = buildImpliedDistribution({
+    calls: chain.calls || [], puts: chain.puts || [], spot: chain.underlyingPrice, daysToExpiry: dte,
+  });
+  distCache.set(chain, dist);
+  return dist;
+}
+
+const pctTxt = (v) => `${(v * 100).toFixed(0)}%`;
+
+/**
+ * Shape-aware rationale: what the market prices for this underlying and how
+ * that interacts with the chosen structure.
+ * @param {object|null} dist
+ * @param {string} strategyType  bull_call | bear_put | bull_put | bear_call | pmcc | long_call | long_put
+ */
+function buildDistributionNote(dist, strategyType) {
+  if (!dist) return 'Implied distribution unavailable (too few quoted strikes) — PoP uses a lognormal estimate.';
+  const t = dist.tails.implied;
+  const shape = dist.shape;
+  const range = `90% range $${dist.stats.p5.toFixed(2)}–$${dist.stats.p95.toFixed(2)}`;
+  const base = `Market-implied by expiry: P(≤−20%) ${pctTxt(t.down20)}, P(≥+20%) ${pctTxt(t.up20)}, ${range}. Shape: ${shape.label}.`;
+  const sellsDownside = strategyType === 'bull_put';
+  const buysDownside = strategyType === 'bear_put' || strategyType === 'long_put';
+  const buysUpside = ['bull_call', 'long_call', 'pmcc'].includes(strategyType);
+  let fit = '';
+  if (shape.key === 'left-tail') {
+    if (sellsDownside) fit = ` Caution: this sells the crash tail the market prices at ${shape.leftTailRatio}× a normal curve — you are paid for it, but size small and keep the long put as protection.`;
+    else if (buysDownside) fit = ` Downside protection is priced rich (${shape.leftTailRatio}× normal crash odds); the spread's short put offsets part of that premium.`;
+    else if (buysUpside) fit = ' Owners of this name carry a fat crash tail; a defined-risk spread limits exposure to it.';
+  } else if (shape.key === 'lottery') {
+    if (buysUpside) fit = ' Lottery-ticket shape: the right tail is large — a defined-risk call structure captures it without owning the full downside.';
+    else if (sellsDownside || strategyType === 'bear_call') fit = ' Lottery-ticket shape: very wide outcome range — credit spreads can hit max loss quickly; size small.';
+  } else if (shape.key === 'right-tail' && buysUpside) {
+    fit = ' Upside is priced rich; the short call in the spread sells some of that premium back.';
+  } else if (shape.key === 'narrow') {
+    fit = ' Narrow distribution: large moves are priced as unlikely, so far-OTM targets rarely pay.';
+  }
+  return base + fit;
+}
+
+/** Common distribution-derived fields for a spread candidate. */
+function distributionFields(dist, best) {
+  return {
+    popMethod: best?.popMethod ?? (dist ? 'implied' : 'lognormal'),
+    popLognormal: best?.popLognormal ?? null,
+    expectedValue: best?.expectedValue ?? null,
+    probMaxProfit: best?.probMaxProfit ?? null,
+    probMaxLoss: best?.probMaxLoss ?? null,
+    impliedDistribution: distributionSummary(dist),
+  };
+}
+
 /**
  * Build a long call or long put recommendation.
  */
@@ -319,6 +390,9 @@ function buildDirectionalBuy(asset, chain, band, direction) {
   const maxLoss = mid * 100; // per contract
   const delta = estimateDelta(bestLeg, underlyingPrice, dte, isBullish);
   const strategyType = isBullish ? 'Long Call' : 'Long Put';
+  const dist = chainDistribution(chain);
+  const breakevenPx = isBullish ? bestLeg.strike + mid : bestLeg.strike - mid;
+  const popImplied = dist ? (isBullish ? probAbove(dist, breakevenPx) : probBelow(dist, breakevenPx)) : null;
 
   return {
     symbol: asset.symbol,
@@ -342,8 +416,10 @@ function buildDirectionalBuy(asset, chain, band, direction) {
     netCost: mid * 100,
     maxProfit: Infinity, // undefined for naked longs
     maxLoss,
-    breakeven: isBullish ? bestLeg.strike + mid : bestLeg.strike - mid,
-    probabilityOfProfit: delta != null ? Math.abs(delta) : null,
+    breakeven: breakevenPx,
+    probabilityOfProfit: popImplied ?? (delta != null ? Math.abs(delta) : null),
+    popMethod: popImplied != null ? 'implied' : 'lognormal',
+    impliedDistribution: distributionSummary(dist),
     dte,
     opportunityScore: computeBandAdjustedScore(asset, band),
     drawdownFlag: false, // checked later with allocation
@@ -354,6 +430,7 @@ function buildDirectionalBuy(asset, chain, band, direction) {
         : `${isBullish ? 'ATM/slightly-ITM' : 'ATM/slightly-ITM'} strike $${bestLeg.strike} balances cost and delta exposure`,
       horizonReason: buildHorizonReason(asset, band, direction),
       riskNote: `Max loss $${maxLoss.toFixed(0)} (100% of premium). ${band === 'leaps' ? 'LEAPS have lower theta decay rate but require multi-year thesis.' : 'Time decay accelerates in last 60 days.'}`,
+      distributionNote: buildDistributionNote(dist, isBullish ? 'long_call' : 'long_put'),
     },
   };
 }
@@ -367,6 +444,7 @@ function buildDebitSpread(asset, chain, band, direction) {
   if (!underlyingPrice || dte == null) return null;
 
   const spreadType = direction === 'bullish' ? 'bull_call' : 'bear_put';
+  const dist = chainDistribution(chain);
   // Moneyness filter: short ±15%, medium ±25%, LEAPS ±35% (wider room for OTM
   // debit spreads that satisfy the high return-on-capital floor).
   const maxMoneynessDist = band === 'leaps' ? 0.35 : band === 'medium' ? 0.25 : 0.15;
@@ -399,6 +477,7 @@ function buildDebitSpread(asset, chain, band, direction) {
         minReturnOnCapital: MIN_RETURN_ON_CAPITAL,
         minProbabilityOfProfit: MIN_POP,
         ...QUOTE_GATES,
+        distribution: dist,
       });
       if (candidates.length > 0) {
         appliedMinWidth = stepMin;
@@ -419,6 +498,7 @@ function buildDebitSpread(asset, chain, band, direction) {
       minReturnOnCapital: MIN_RETURN_ON_CAPITAL,
       minProbabilityOfProfit: MIN_POP,
       ...QUOTE_GATES,
+      distribution: dist,
     });
   }
 
@@ -453,6 +533,7 @@ function buildDebitSpread(asset, chain, band, direction) {
     maxLoss: best.maxLoss,
     breakeven: best.breakeven,
     probabilityOfProfit: best.probabilityOfProfit,
+    ...distributionFields(dist, best),
     riskReward: best.riskReward,
     returnOnCapital: best.returnOnCapital,
     breakevenMovePct: best.breakevenMovePct,
@@ -464,6 +545,7 @@ function buildDebitSpread(asset, chain, band, direction) {
       strikeReason: `${best.longLeg.strike}/${best.shortLeg.strike} spread — width $${best.width}${isLeapsBullCall ? ` (widest viable ≥${appliedMinWidth}pt LEAPS floor)` : ''}, net debit $${best.netCost.toFixed(2)} (≤25% of width for ${best.returnOnCapital.toFixed(1)}× return-on-capital)`,
       horizonReason: buildHorizonReason(asset, band, direction),
       riskNote: `Capital at risk $${best.maxLoss.toFixed(0)}, max profit $${best.maxProfit.toFixed(0)} (${best.returnOnCapital.toFixed(1)}× RoC), PoP ${best.probabilityOfProfit != null ? (best.probabilityOfProfit * 100).toFixed(0) + '%' : 'N/A'}. Breakeven needs a ${(best.breakevenMovePct * 100).toFixed(1)}% move.`,
+      distributionNote: buildDistributionNote(dist, spreadType),
     },
   };
 }
@@ -478,6 +560,7 @@ function buildIncomeSpread(asset, chain, band, direction) {
 
   // Bull put spread for bullish/neutral, bear call spread for bearish/neutral
   const spreadType = direction === 'bearish' ? 'bear_call' : 'bull_put';
+  const dist = chainDistribution(chain);
   // Moneyness filter: short ±10%, medium ±20%, LEAPS ±30%
   const maxMoneynessDist = band === 'leaps' ? 0.30 : band === 'medium' ? 0.20 : 0.10;
   // Scale maxWidth relative to underlying price. 2% of spot for credit.
@@ -496,6 +579,7 @@ function buildIncomeSpread(asset, chain, band, direction) {
     minReturnOnCapital: MIN_CREDIT_RETURN_ON_CAPITAL,
     minProbabilityOfProfit: MIN_CREDIT_POP,
     ...QUOTE_GATES,
+    distribution: dist,
   });
 
   if (candidates.length === 0) return null;
@@ -523,6 +607,7 @@ function buildIncomeSpread(asset, chain, band, direction) {
     maxLoss: best.maxLoss,
     breakeven: best.breakeven,
     probabilityOfProfit: best.probabilityOfProfit,
+    ...distributionFields(dist, best),
     riskReward: best.riskReward,
     returnOnCapital: best.returnOnCapital,
     breakevenMovePct: best.breakevenMovePct,
@@ -534,6 +619,7 @@ function buildIncomeSpread(asset, chain, band, direction) {
       strikeReason: `Sell $${best.shortLeg.strike} / buy $${best.longLeg.strike} ${spreadType === 'bull_put' ? 'puts' : 'calls'} — short strike ${(otmPct * 100).toFixed(1)}% out-of-the-money (${spreadType === 'bull_put' ? 'below' : 'above'} spot $${underlyingPrice.toFixed(2)}), credit $${credit.toFixed(2)} = ${((credit / best.width) * 100).toFixed(0)}% of the $${best.width} width`,
       horizonReason: buildHorizonReason(asset, band, incomeDirection) + ' Income spreads benefit from theta decay; profit if the underlying stays on the right side of the short strike.',
       riskNote: `Max loss $${best.maxLoss.toFixed(0)}, max profit $${best.maxProfit.toFixed(0)} (${(best.returnOnCapital * 100).toFixed(0)}% on risk), PoP ${best.probabilityOfProfit != null ? (best.probabilityOfProfit * 100).toFixed(0) + '%' : 'N/A'}. Income trades win often but lose more per loss — size small.`,
+      distributionNote: buildDistributionNote(dist, spreadType),
     },
   };
 }
@@ -613,8 +699,11 @@ function buildPMCC(asset, longChain, shortChain) {
 
   const breakeven = longPick.c.strike + netDebit;
   const breakevenMovePct = Math.abs(breakeven - spot) / spot;
-  // PoP proxy: risk-neutral P(S > breakeven) at short expiry ≈ delta at breakeven.
-  const pop = bsCallDelta(spot, breakeven, Math.max(shortDte, 1) / 365, 0.045, 0, ivLong);
+  // PoP: options-implied P(S > breakeven) at the short expiry (the short
+  // chain's own distribution); lognormal delta-at-breakeven as fallback.
+  const shortDist = chainDistribution(shortChain);
+  const popImplied = shortDist ? probAbove(shortDist, breakeven) : null;
+  const pop = popImplied ?? bsCallDelta(spot, breakeven, Math.max(shortDte, 1) / 365, 0.045, 0, ivLong);
   if (pop == null || pop < MIN_POP) return null;
 
   return {
@@ -634,6 +723,8 @@ function buildPMCC(asset, longChain, shortChain) {
     maxLoss: capitalAtRisk,
     breakeven,
     probabilityOfProfit: pop,
+    popMethod: popImplied != null ? 'implied' : 'lognormal',
+    impliedDistribution: distributionSummary(shortDist),
     riskReward: returnOnCapital,
     returnOnCapital,
     breakevenMovePct,
@@ -645,6 +736,7 @@ function buildPMCC(asset, longChain, shortChain) {
       strikeReason: `Long ${longPick.c.strike} LEAPS (~${(longPick.delta * 100).toFixed(0)}Δ) financed by short ${shortPick.c.strike} call — net debit $${netDebit.toFixed(2)} vs a naked LEAPS.`,
       horizonReason: `${BANDS.leaps.label}: capital-efficient stock replacement. The short call reduces cost basis; roll it each cycle. Long leg has ${longDte}d of life.`,
       riskNote: `Capital at risk $${capitalAtRisk.toFixed(0)}, single-cycle max profit $${maxProfit.toFixed(0)} (${returnOnCapital.toFixed(1)}× RoC), PoP ${(pop * 100).toFixed(0)}%. Assignment/early-exercise risk on the short call.`,
+      distributionNote: buildDistributionNote(shortDist, 'pmcc'),
     },
   };
 }
@@ -913,6 +1005,8 @@ export { BANDS, daysToExpiration, classifyBand, computeOpportunityScore, compute
 
 // Expose internals for unit testing
 export const _internal = {
+  chainDistribution,
+  buildDistributionNote,
   selectStrategy,
   buildPMCC,
   buildDebitSpread,

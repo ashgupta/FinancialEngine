@@ -540,3 +540,52 @@ describe('optionsOpportunities', () => {
     });
   });
 });
+
+// ─── Options-implied distribution integration ────────────
+import { _internal as oppInternal } from '../../src/engine/optionsOpportunities.js';
+import { black76, buildImpliedDistribution } from '../../src/engine/impliedDistribution.js';
+
+describe('optionsOpportunities — implied distribution', () => {
+  const { chainDistribution, buildDistributionNote } = oppInternal;
+  const S = 100;
+  const dte = 120;
+  const T = dte / 365;
+  const F = S * Math.exp(0.043 * T);
+  const vol = (k) => Math.max(0.12, 0.30 - 0.45 * Math.log(k / F) + 0.6 * Math.log(k / F) ** 2);
+  const skewChain = () => {
+    const mk = (isCall) => {
+      const out = [];
+      for (let k = 60; k <= 150; k += 5) {
+        const p = black76(F, k, T, vol(k), isCall, 0.043);
+        out.push({ strike: k, bid: +(p * 0.99).toFixed(3), ask: +(p * 1.01).toFixed(3), impliedVolatility: vol(k), volume: 100, openInterest: 500 });
+      }
+      return out;
+    };
+    return { underlyingPrice: S, expirationDate: D(dte), calls: mk(true), puts: mk(false) };
+  };
+
+  it('chainDistribution builds once per chain object and matches the engine', () => {
+    const chain = skewChain();
+    const a = chainDistribution(chain);
+    expect(a).not.toBeNull();
+    expect(chainDistribution(chain)).toBe(a);
+    expect(a.shape.key).toBe('left-tail');
+  });
+
+  it('chainDistribution returns null for sparse or missing chains (boundary)', () => {
+    expect(chainDistribution({ underlyingPrice: S, expirationDate: D(dte), calls: [], puts: [] })).toBeNull();
+    expect(chainDistribution(null)).toBeNull();
+  });
+
+  it('distribution note warns when a bull put spread sells a fat crash tail', () => {
+    const dist = buildImpliedDistribution({ ...skewChain(), spot: S, daysToExpiry: dte });
+    const note = buildDistributionNote(dist, 'bull_put');
+    expect(note).toMatch(/Market-implied by expiry/);
+    expect(note).toMatch(/sells the crash tail/);
+    expect(buildDistributionNote(dist, 'bull_call')).not.toMatch(/sells the crash tail/);
+  });
+
+  it('missing distribution → lognormal fallback note (invalid input)', () => {
+    expect(buildDistributionNote(null, 'bull_call')).toMatch(/lognormal/);
+  });
+});

@@ -7,6 +7,7 @@ import SectionTimestamp from './SectionTimestamp';
 import WeeklyTrendView from './WeeklyTrendView';
 import { useWatchlist } from '../contexts/WatchlistContext.jsx';
 import { usePortfolio } from '../contexts/PortfolioContext.jsx';
+import { ShapeBadge } from './ImpliedDistributionPanel';
 
 function Card({ children, className = '' }) {
   return (
@@ -90,6 +91,7 @@ function RecCard({ rec, rank }) {
           <span className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] ${dir.bg} ${dir.color} ${dir.border} border`}>
             <DirIcon size={9} /> {rec.direction}
           </span>
+          {rec.impliedDistribution?.shape && <ShapeBadge shape={rec.impliedDistribution.shape} />}
         </div>
         <div className="text-right">
           <div className="text-xs font-medium text-surface-300">{rec.strategy}</div>
@@ -147,8 +149,13 @@ function RecCard({ rec, rank }) {
           </div>
         </div>
         <div>
-          <div className="text-surface-500">PoP</div>
+          <div className="text-surface-500" title={rec.popMethod === 'implied' ? 'Probability of profit under the options-implied (Breeden–Litzenberger) distribution' : 'Lognormal estimate — implied distribution unavailable'}>
+            PoP{rec.popMethod === 'implied' ? ' (implied)' : ''}
+          </div>
           <div className="text-surface-200 font-medium">{fmtPct(rec.probabilityOfProfit)}</div>
+          {rec.probMaxLoss != null && (
+            <div className="text-[10px] text-surface-500" title="Options-implied probability of finishing at max loss">max loss {fmtPct(rec.probMaxLoss)}</div>
+          )}
         </div>
         <div>
           <div className="text-surface-500">RoC</div>
@@ -180,6 +187,11 @@ function RecCard({ rec, rank }) {
         <div className="text-[11px] text-surface-400 leading-relaxed">
           <span className="text-surface-500">Risk: </span>{rec.why.riskNote}
         </div>
+        {rec.why.distributionNote && (
+          <div className="text-[11px] text-surface-400 leading-relaxed">
+            <span className="text-surface-500">Market pricing: </span>{rec.why.distributionNote}
+          </div>
+        )}
       </div>
 
       {/* Drawdown flag */}

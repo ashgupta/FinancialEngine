@@ -9,6 +9,9 @@ import {
 } from 'recharts';
 import { buildBrokeragePlan } from '../engine/brokeragePlanner.js';
 import { evaluateStrategy } from '../engine/strategyEvaluator.js';
+import { buildImpliedDistribution } from '../engine/impliedDistribution.js';
+import { fetchOptionsChain } from '../engine/marketData.js';
+import { ShapeBadge } from './ImpliedDistributionPanel';
 import { useWatchlist } from '../contexts/WatchlistContext.jsx';
 import SectionTimestamp from './SectionTimestamp';
 import WeeklyTrendView from './WeeklyTrendView';
@@ -258,9 +261,37 @@ function StrategyEvaluatorPanel({ riskTolerance, accountValue }) {
   const addLeg = (kind = 'call') => setLegs(prev => [...prev, makeLeg({ kind })]);
   const removeLeg = (i) => setLegs(prev => prev.filter((_, idx) => idx !== i));
 
+  // Optional: price PoP off the options-implied distribution of a real
+  // ticker's chain (expiry nearest the shortest option leg).
+  const [ticker, setTicker] = useState('');
+  const [implied, setImplied] = useState({ dist: null, loading: false, error: null });
+  const shortestDte = useMemo(() => {
+    const d = legs.filter((l) => l.kind !== 'stock').map((l) => l.dte ?? 30);
+    return d.length ? Math.min(...d) : null;
+  }, [legs]);
+  const loadImplied = async () => {
+    const sym = ticker.trim().toUpperCase();
+    if (!sym || shortestDte == null) return;
+    setImplied({ dist: null, loading: true, error: null });
+    try {
+      const base = await fetchOptionsChain(sym);
+      const target = Date.now() / 1000 + shortestDte * 86400;
+      const exp = (base.expirations || []).reduce((a, e) => (a == null || Math.abs(e - target) < Math.abs(a - target) ? e : a), null);
+      const chain = exp ? await fetchOptionsChain(sym, exp) : base;
+      const dte = (chain.expirationDate * 1000 - Date.now()) / 86400000;
+      const dist = buildImpliedDistribution({ calls: chain.calls, puts: chain.puts, spot: chain.underlyingPrice, daysToExpiry: dte });
+      if (chain.underlyingPrice > 0) setSpotPrice(+chain.underlyingPrice.toFixed(2));
+      setImplied({ dist, loading: false, error: dist ? null : 'Too few quoted strikes for an implied distribution.' });
+    } catch (err) {
+      setImplied({ dist: null, loading: false, error: err?.message || 'Chain fetch failed' });
+    }
+  };
+  // Only use a distribution whose expiry is within a week of the shortest leg.
+  const activeDist = implied.dist && shortestDte != null && Math.abs(implied.dist.daysToExpiry - shortestDte) <= 7 ? implied.dist : null;
+
   const result = useMemo(() => evaluateStrategy({
-    legs, spotPrice, riskTolerance, accountValue,
-  }), [legs, spotPrice, riskTolerance, accountValue]);
+    legs, spotPrice, riskTolerance, accountValue, distribution: activeDist,
+  }), [legs, spotPrice, riskTolerance, accountValue, activeDist]);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-5 gap-3">
@@ -273,6 +304,15 @@ function StrategyEvaluatorPanel({ riskTolerance, accountValue }) {
             <input type="number" value={spotPrice} onChange={(e) => setSpotPrice(+e.target.value)}
               className="w-24 bg-surface-800 border border-surface-700 rounded pl-6 pr-2 py-1 text-xs" step={0.01} />
           </div>
+          <label className="text-xs text-surface-400 ml-2">Ticker:</label>
+          <input value={ticker} onChange={(e) => setTicker(e.target.value)} placeholder="optional"
+            aria-label="Ticker for options-implied PoP"
+            className="w-20 bg-surface-800 border border-surface-700 rounded px-2 py-1 text-xs uppercase" />
+          <button onClick={loadImplied} disabled={!ticker.trim() || implied.loading}
+            title="Load the chain and use its options-implied distribution for PoP"
+            className="text-[10px] px-2 py-1 bg-brand-500/20 text-brand-300 rounded hover:bg-brand-500/30 disabled:opacity-40">
+            {implied.loading ? 'Loading…' : 'Use implied PoP'}
+          </button>
           <div className="flex gap-1 ml-auto">
             <button onClick={() => addLeg('stock')} className="text-[10px] px-2 py-1 bg-blue-500/20 text-blue-300 rounded hover:bg-blue-500/30">+ Stock</button>
             <button onClick={() => addLeg('call')} className="text-[10px] px-2 py-1 bg-emerald-500/20 text-emerald-300 rounded hover:bg-emerald-500/30">+ Call</button>
@@ -369,8 +409,20 @@ function StrategyEvaluatorPanel({ riskTolerance, accountValue }) {
               <Stat label="Net Cost" value={`${result.isDebit ? '-' : '+'}${fmtUsd(Math.abs(result.netCost))}`} tone={result.isDebit ? 'text-red-300' : 'text-emerald-300'} />
               <Stat label="Max Profit" value={fmtUsd(result.maxProfit)} tone="text-emerald-300" />
               <Stat label="Max Loss"   value={fmtUsd(result.maxLoss)}   tone="text-red-300" />
-              <Stat label="PoP" value={result.probabilityOfProfit != null ? fmtPct(result.probabilityOfProfit) : '—'} tone="text-blue-300" />
+              <Stat label={result.popMethod === 'implied' ? 'PoP (implied)' : 'PoP'} value={result.probabilityOfProfit != null ? fmtPct(result.probabilityOfProfit) : '—'} tone="text-blue-300" />
             </div>
+            {(result.distributionShape || implied.error || (implied.dist && !activeDist)) && (
+              <div className="text-[11px] text-surface-400 space-y-1">
+                {result.distributionShape && (
+                  <div className="flex items-center gap-2">
+                    <ShapeBadge shape={result.distributionShape} />
+                    <span>EV at expiry {fmtUsdSigned(result.expectedValue)} under the options-implied distribution</span>
+                  </div>
+                )}
+                {implied.dist && !activeDist && <div className="text-yellow-300">Loaded expiry ({Math.round(implied.dist.daysToExpiry)}d) is more than a week from the shortest leg ({shortestDte}d) — using the lognormal estimate.</div>}
+                {implied.error && <div className="text-yellow-300">{implied.error}</div>}
+              </div>
+            )}
 
             {result.breakevens.length > 0 && (
               <div>

@@ -16,6 +16,10 @@ import {
   buildVBottomPlan,
   buildDebasementPanel,
   buildCrashThesis,
+  computeCreditStress,
+  evaluateThesisAlerts,
+  diffAlerts,
+  buildImpliedCrashOdds,
   _internal,
 } from '../../src/engine/crashThesis.js';
 import { bsCallPrice } from '../../src/engine/leapsAnalyzer.js';
@@ -190,6 +194,138 @@ describe('buildScorecard', () => {
     const s = buildScorecard({});
     expect(s.checks).toEqual([]);
     expect(s.verdict).toMatch(/No confirmation/);
+  });
+});
+
+// ─── Credit stress ───────────────────────────────────────
+
+/** n daily closes moving linearly from a to b. */
+const ramp = (n, a, b) => Array.from({ length: n }, (_, i) => a + ((b - a) * i) / (n - 1));
+
+describe('computeCreditStress', () => {
+  const ief = ramp(260, 95, 95);
+  it('junk underperforming Treasuries (ratio below 50 & 200-DMA) supports the thesis', () => {
+    const hyg = [...ramp(200, 80, 82), ...ramp(60, 82, 74)];
+    const c = computeCreditStress({ hyg, ief });
+    expect(c.status).toBe('supports');
+    expect(c.vs50Pct).toBeLessThan(0);
+    expect(c.vs200Pct).toBeLessThan(0);
+    expect(c.chg20Pct).toBeLessThan(0);
+    expect(c.detail).toMatch(/widening/);
+  });
+  it('junk outperforming (ratio above both averages) is against', () => {
+    const c = computeCreditStress({ hyg: ramp(260, 76, 84), ief });
+    expect(c.status).toBe('against');
+    expect(c.vs50Pct).toBeGreaterThan(0);
+  });
+  it('below the 50-DMA but above the 200-DMA is neutral (boundary)', () => {
+    const hyg = [...ramp(200, 70, 82), ...ramp(40, 82, 84), ...ramp(20, 84, 81)];
+    const c = computeCreditStress({ hyg, ief });
+    expect(c.vs50Pct).toBeLessThan(0);
+    expect(c.vs200Pct).toBeGreaterThan(0);
+    expect(c.status).toBe('neutral');
+  });
+  it('insufficient or invalid data → null', () => {
+    expect(computeCreditStress({ hyg: ramp(100, 80, 80), ief: ramp(100, 95, 95) })).toBeNull();
+    expect(computeCreditStress({})).toBeNull();
+    expect(computeCreditStress({ hyg: ramp(260, 80, 80), ief: ramp(260, 0, 0) })).toBeNull();
+  });
+  it('aligns series of different lengths on the most recent closes', () => {
+    const c = computeCreditStress({ hyg: ramp(300, 76, 84), ief: ramp(220, 95, 95) });
+    expect(c).not.toBeNull();
+    expect(c.status).toBe('against');
+  });
+});
+
+describe('buildScorecard credit check', () => {
+  it('credit stress counts as a confirmation signal', () => {
+    const credit = { status: 'supports', detail: 'HYG/IEF below 50 & 200-DMA — credit spreads widening' };
+    const s = buildScorecard({ credit });
+    expect(s.checks.find((c) => c.key === 'credit').status).toBe('supports');
+    expect(s.confirming).toBe(1);
+  });
+  it('null credit → no credit check', () => {
+    expect(buildScorecard({ credit: null }).checks.find((c) => c.key === 'credit')).toBeUndefined();
+  });
+});
+
+// ─── Alerts ──────────────────────────────────────────────
+
+describe('evaluateThesisAlerts', () => {
+  const KILL = Date.UTC(2027, 2, 31);
+  const base = { asOf: Date.UTC(2026, 10, 22), phase: { phase: 'window-open', daysToKillSwitch: 129 }, scorecard: { confirming: 0 } };
+  const keys = (a) => a.map((x) => x.key);
+
+  it('calm market with no credit stress → no alerts', () => {
+    expect(evaluateThesisAlerts({ ...base, crash: { score: 20.7, level: 'calm' }, credit: { status: 'against' } })).toEqual([]);
+  });
+  it('Crash Radar at Watch alone → info alert only', () => {
+    const a = evaluateThesisAlerts({ ...base, crash: { score: 30, level: 'watch', label: 'Watch' } });
+    expect(keys(a)).toEqual(['radar-watch']);
+    expect(a[0].severity).toBe('info');
+  });
+  it('Radar ≥ Watch AND credit stress → critical "aligned" alert', () => {
+    const a = evaluateThesisAlerts({ ...base, crash: { score: 30, level: 'watch', label: 'Watch' }, credit: { status: 'supports', detail: 'x' } });
+    expect(keys(a)).toEqual(expect.arrayContaining(['radar-watch', 'credit-stress', 'aligned']));
+    expect(a.find((x) => x.key === 'aligned').severity).toBe('critical');
+    expect(a[0].key).toBe('aligned'); // most severe first
+  });
+  it('Elevated radar supersedes the Watch alert', () => {
+    const a = evaluateThesisAlerts({ ...base, crash: { score: 50, level: 'elevated', label: 'Elevated' } });
+    expect(keys(a)).toContain('radar-elevated');
+    expect(keys(a)).not.toContain('radar-watch');
+  });
+  it('≥3 confirming checks and an underway phase raise critical alerts', () => {
+    const a = evaluateThesisAlerts({ ...base, phase: { phase: 'underway', label: 'Drawdown underway', daysToKillSwitch: 100 }, scorecard: { confirming: 3 } });
+    expect(keys(a)).toEqual(expect.arrayContaining(['confirmed', 'phase-underway']));
+  });
+  it('kill switch within 14 days with nothing underway → info alert (boundary)', () => {
+    const near = evaluateThesisAlerts({ ...base, asOf: KILL - 14 * 86400000, phase: { phase: 'window-open', daysToKillSwitch: 14 } });
+    expect(keys(near)).toEqual(['kill-switch-near']);
+    const far = evaluateThesisAlerts({ ...base, phase: { phase: 'window-open', daysToKillSwitch: 15 } });
+    expect(far).toEqual([]);
+  });
+  it('invalid input → empty list', () => {
+    expect(evaluateThesisAlerts()).toEqual([]);
+    expect(evaluateThesisAlerts({ crash: { score: NaN } })).toEqual([]);
+  });
+});
+
+describe('diffAlerts', () => {
+  const A = [{ key: 'aligned' }, { key: 'credit-stress' }];
+  it('returns only alerts not present before', () => {
+    expect(diffAlerts(A, ['credit-stress']).map((a) => a.key)).toEqual(['aligned']);
+  });
+  it('first run notifies everything; identical state notifies nothing', () => {
+    expect(diffAlerts(A, []).length).toBe(2);
+    expect(diffAlerts(A, ['aligned', 'credit-stress'])).toEqual([]);
+  });
+  it('invalid input is tolerated', () => {
+    expect(diffAlerts(null, null)).toEqual([]);
+    expect(diffAlerts(A, undefined).length).toBe(2);
+  });
+});
+
+// ─── Market-implied crash odds ───────────────────────────
+
+describe('buildImpliedCrashOdds', () => {
+  it('prices the drawdown range from the expiry nearest the kill switch', () => {
+    const o = buildImpliedCrashOdds({ asOf: ASOF, chains: CHAINS });
+    expect(o).not.toBeNull();
+    expect(o.expiry).toBe(EXP.mar);
+    expect(o.rows.map((r) => r.decline)).toEqual([0.1, 0.2, 0.3]);
+    expect(o.rows[0].implied).toBeGreaterThan(o.rows[1].implied);
+    expect(o.rows[1].implied).toBeGreaterThan(o.rows[2].implied);
+    // Steep put skew → crash odds above the lognormal baseline.
+    expect(o.rows[2].implied).toBeGreaterThan(o.rows[2].lognormal);
+    expect(o.note).toMatch(/SPY ≤ −20%/);
+  });
+  it('expired-only chains → null (boundary)', () => {
+    expect(buildImpliedCrashOdds({ asOf: Date.UTC(2028, 0, 1), chains: CHAINS })).toBeNull();
+  });
+  it('no chains / invalid input → null', () => {
+    expect(buildImpliedCrashOdds({ asOf: ASOF, chains: [] })).toBeNull();
+    expect(buildImpliedCrashOdds()).toBeNull();
   });
 });
 
@@ -449,6 +585,20 @@ describe('buildButterflies', () => {
 // ─── Integration ─────────────────────────────────────────
 
 describe('buildCrashThesis', () => {
+  it('includes credit stress and alerts when credit inputs are supplied', () => {
+    const hyg = [...ramp(200, 80, 82), ...ramp(60, 82, 74)];
+    const ief = ramp(260, 95, 95);
+    const watchCrash = { ...CALM_CRASH, score: 30, level: 'watch', label: 'Watch' };
+    const r = buildCrashThesis({ asOf: ASOF, crash: watchCrash, volatility: CALM_VOL, chains: CHAINS, creditInputs: { hyg, ief } });
+    expect(r.credit.status).toBe('supports');
+    expect(r.scorecard.checks.find((c) => c.key === 'credit')).toBeDefined();
+    expect(r.alerts.map((a) => a.key)).toContain('aligned');
+  });
+  it('no credit inputs → credit null, alerts still an array', () => {
+    const r = buildCrashThesis({ asOf: ASOF, crash: CALM_CRASH, volatility: CALM_VOL, chains: CHAINS });
+    expect(r.credit).toBeNull();
+    expect(Array.isArray(r.alerts)).toBe(true);
+  });
   it('assembles the full payload deterministically', () => {
     const p = { asOf: ASOF, crash: CALM_CRASH, volatility: CALM_VOL, chains: CHAINS, portfolioValue: 500000, hedgeBudgetPct: 0.02 };
     const a = buildCrashThesis(p);

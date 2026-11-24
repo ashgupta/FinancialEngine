@@ -42,6 +42,12 @@ const STATUS = {
   against: { icon: XCircle, cls: 'text-red-400', text: 'Against' },
 };
 
+const ALERT_STYLE = {
+  critical: 'bg-red-500/10 border-red-500/40 text-red-300',
+  warning: 'bg-orange-500/10 border-orange-500/40 text-orange-300',
+  info: 'bg-blue-500/10 border-blue-500/30 text-blue-300',
+};
+
 const TRADE_COLORS = { calendar: '#3b82f6', diagonal: '#a855f7', putSpread: '#f59e0b', killSwitchPut: '#ef4444', symFly: '#22d3ee', bwbFly: '#f472b6' };
 
 const money = (v) => (v == null || isNaN(v) ? '—' : `${v < 0 ? '−' : ''}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}`);
@@ -308,6 +314,21 @@ export default function CrashThesisTab() {
             </a>
           </Card>
 
+          {/* Live alerts */}
+          {data.alerts?.length > 0 && (
+            <div className="space-y-2" role="status" aria-live="polite">
+              {data.alerts.map((a) => (
+                <div key={a.key} className={`flex items-start gap-2 rounded-xl border px-4 py-3 ${ALERT_STYLE[a.severity] || ALERT_STYLE.info}`}>
+                  <ShieldAlert size={16} className="mt-0.5 shrink-0" />
+                  <div>
+                    <p className="text-sm font-semibold">{a.title}</p>
+                    <p className="text-xs opacity-90">{a.message}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Pillars */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             {data.thesis.pillars.map((p) => (
@@ -376,8 +397,34 @@ export default function CrashThesisTab() {
                 </tbody>
               </table>
             </div>
-            <p className="text-[10px] text-surface-600 mt-2">Cheap vol and put skew are entry conditions (good time to build the calendar); trend, breadth, curve, COT and the composite are confirmation signals.</p>
+            <p className="text-[10px] text-surface-600 mt-2">Cheap vol and put skew are entry conditions (good time to build the calendar); trend, breadth, curve, COT, credit (HYG/IEF) and the composite are confirmation signals.</p>
           </Card>
+
+          {/* Market-implied crash odds (Breeden–Litzenberger) */}
+          {data.impliedCrashOdds && (
+            <Card>
+              <Heading icon={Crosshair} title="What options price for the drawdown" sub={`${uLabel} chain · ${data.impliedCrashOdds.expiryLabel} (${data.impliedCrashOdds.dte}d)`} />
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-surface-500 border-b border-surface-800">
+                    <th className="text-left py-2 pr-3 font-medium">Decline by expiry</th>
+                    <th className="text-right py-2 px-2 font-medium">Options-implied</th>
+                    <th className="text-right py-2 pl-3 font-medium">Normal curve</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.impliedCrashOdds.rows.map((r) => (
+                    <tr key={r.decline} className="border-b border-surface-800/50">
+                      <td className="py-2 pr-3 text-surface-200">≤ −{(r.decline * 100).toFixed(0)}%</td>
+                      <td className="py-2 px-2 text-right font-mono text-orange-300">{pct(r.implied)}</td>
+                      <td className="py-2 pl-3 text-right font-mono text-surface-500">{pct(r.lognormal)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-[10px] text-surface-600 mt-2">{data.impliedCrashOdds.note}</p>
+            </Card>
+          )}
 
           {/* Sizing inputs */}
           <Card>

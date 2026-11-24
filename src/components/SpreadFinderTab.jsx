@@ -5,6 +5,8 @@ import {
 } from 'lucide-react';
 import { fetchOptionsChain, OPTIONABLE_SYMBOLS } from '../engine/marketData.js';
 import { analyzeSpreads, isLeaps, formatDTE, expiryCategory } from '../engine/spreadAnalyzer.js';
+import { buildImpliedDistribution, distributionSummary, distributionCurve } from '../engine/impliedDistribution.js';
+import ImpliedDistributionPanel from './ImpliedDistributionPanel';
 import SectionTimestamp from './SectionTimestamp';
 import WeeklyTrendView from './WeeklyTrendView';
 
@@ -25,9 +27,9 @@ const SPREAD_TYPES = [
 
 const SORT_OPTIONS = [
   { id: 'composite', label: 'Composite Score',    desc: 'Blends EV, R/R, and liquidity' },
-  { id: 'ev',        label: 'Expected Value',     desc: 'pop × maxProfit − (1−pop) × maxLoss' },
+  { id: 'ev',        label: 'Expected Value',     desc: 'Payoff integrated over the options-implied distribution (≈0 = fairly priced)' },
   { id: 'rr',        label: 'Risk/Reward',        desc: 'maxProfit / maxLoss' },
-  { id: 'pop',       label: 'Probability of Profit', desc: 'PoP at expiry under GBM' },
+  { id: 'pop',       label: 'Probability of Profit', desc: 'PoP at expiry under the options-implied distribution' },
   { id: 'cost',      label: 'Lowest Cost',        desc: 'Cheapest debit (or richest credit)' },
 ];
 
@@ -107,6 +109,17 @@ export default function SpreadFinderTab() {
     return Math.max(1, Math.ceil((selectedExpiry * 1000 - Date.now()) / 86_400_000));
   }, [selectedExpiry]);
 
+  // ── Options-implied distribution for this expiry (Breeden–Litzenberger) ──
+  const distribution = useMemo(() => {
+    if (!chain?.underlyingPrice) return null;
+    return buildImpliedDistribution({
+      calls: chain.calls || [], puts: chain.puts || [], spot: chain.underlyingPrice,
+      daysToExpiry, dividendYield: dividendYield / 100,
+    });
+  }, [chain, daysToExpiry, dividendYield]);
+  const distSummary = useMemo(() => distributionSummary(distribution), [distribution]);
+  const distCurve = useMemo(() => distributionCurve(distribution, 80), [distribution]);
+
   // ── Run the analyzer ────────────────────────────────────
   const candidates = useMemo(() => {
     if (!chain || !chain.underlyingPrice) return [];
@@ -120,11 +133,12 @@ export default function SpreadFinderTab() {
       maxWidth,
       minLiquidity,
       dividendYield: dividendYield / 100,   // user enters 2.5 → 0.025
+      distribution,
       // Quote-quality gate: drop stale/one-sided legs and spreads whose leg
       // bid/ask widths swamp the strike width (phantom mid-price spreads).
       ...(tradeableOnly ? { requireTwoSidedQuotes: true, maxLegSpreadToWidth: 0.35 } : {}),
     });
-  }, [chain, daysToExpiry, spreadType, maxRisk, maxWidth, minLiquidity, dividendYield, tradeableOnly]);
+  }, [chain, daysToExpiry, spreadType, maxRisk, maxWidth, minLiquidity, dividendYield, tradeableOnly, distribution]);
 
   // ── Re-sort by user choice ──────────────────────────────
   const sortedCandidates = useMemo(() => {
@@ -462,12 +476,17 @@ export default function SpreadFinderTab() {
             <StatCard
               label="Prob. of Profit"
               value={fmtPct(topPick.probabilityOfProfit)}
-              sublabel="GBM-implied"
+              sublabel={topPick.popMethod === 'implied'
+                ? `options-implied · lognormal ${fmtPct(topPick.popLognormal, 0)}`
+                : 'lognormal estimate'}
               color="text-blue-300"
             />
             <StatCard
               label="Expected Value"
               value={fmtUsd(topPick.expectedValue)}
+              sublabel={topPick.probMaxLoss != null
+                ? `P(max loss) ${fmtPct(topPick.probMaxLoss, 0)} · P(max profit) ${fmtPct(topPick.probMaxProfit, 0)}`
+                : undefined}
               color={topPick.expectedValue > 0 ? 'text-green-300' : 'text-red-300'}
             />
           </div>
@@ -485,6 +504,18 @@ export default function SpreadFinderTab() {
               {' '}<span className="font-mono text-gray-200">${topPick.breakeven.toFixed(2)}</span>
             </span>
           </div>
+        </Card>
+      )}
+
+      {/* Options-implied distribution */}
+      {chain?.underlyingPrice > 0 && (
+        <Card>
+          <div className="flex items-center gap-2 mb-3">
+            <Target size={14} className="text-cyan-400" />
+            <span className="text-sm font-semibold text-gray-200">What the market is pricing</span>
+            <span className="text-xs text-gray-500">options-implied distribution for this expiry · drives PoP, EV and tail odds below</span>
+          </div>
+          <ImpliedDistributionPanel summary={distSummary} curve={distCurve} markers={topPick ? [topPick.breakeven] : []} />
         </Card>
       )}
 
@@ -515,7 +546,8 @@ export default function SpreadFinderTab() {
                   <th className="py-2 text-right font-medium">Max Profit</th>
                   <th className="py-2 text-right font-medium">Max Loss</th>
                   <th className="py-2 text-right font-medium">R/R</th>
-                  <th className="py-2 text-right font-medium">PoP</th>
+                  <th className="py-2 text-right font-medium" title={distribution ? 'Options-implied probability of profit' : 'Lognormal estimate (implied distribution unavailable)'}>PoP{distribution ? ' (impl.)' : ''}</th>
+                  <th className="py-2 text-right font-medium" title="Probability of finishing at max loss (options-implied)">P(max loss)</th>
                   <th className="py-2 text-right font-medium">EV</th>
                   <th className="py-2 text-right font-medium">BE</th>
                   <th className="py-2 text-right font-medium">Liq</th>
@@ -538,7 +570,8 @@ export default function SpreadFinderTab() {
                       <td className="py-2 text-right font-mono text-green-300">{fmtUsd(c.maxProfit)}</td>
                       <td className="py-2 text-right font-mono text-red-300">{fmtUsd(c.maxLoss)}</td>
                       <td className="py-2 text-right font-mono text-gray-200">1:{c.riskReward.toFixed(2)}</td>
-                      <td className="py-2 text-right font-mono text-blue-300">{fmtPct(c.probabilityOfProfit, 0)}</td>
+                      <td className="py-2 text-right font-mono text-blue-300" title={c.popLognormal != null ? `lognormal ${fmtPct(c.popLognormal, 0)}` : undefined}>{fmtPct(c.probabilityOfProfit, 0)}</td>
+                      <td className="py-2 text-right font-mono text-red-300/80">{fmtPct(c.probMaxLoss, 0)}</td>
                       <td className={`py-2 text-right font-mono ${(c.expectedValue ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
                         {fmtUsd(c.expectedValue)}
                       </td>

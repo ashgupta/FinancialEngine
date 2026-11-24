@@ -22,6 +22,8 @@
  *   }
  */
 
+import { probPayoffPositive, expectedPayoff } from './impliedDistribution.js';
+
 // ── Math helpers ────────────────────────────────────────────
 function erf(x) {
   // Abramowitz & Stegun 7.1.26
@@ -225,8 +227,12 @@ function sizingRecommendation({ maxLoss, riskTolerance, accountValue }) {
  * @param {number} params.spotPrice - current underlying price
  * @param {number} params.riskTolerance - 1–10
  * @param {number} params.accountValue
+ * @param {object|null} [params.distribution]  options-implied distribution for the
+ *   shortest leg's expiry (impliedDistribution.buildImpliedDistribution). When
+ *   supplied, PoP and expected value are integrated over that density instead
+ *   of the single-vol lognormal Monte Carlo.
  */
-export function evaluateStrategy({ legs, spotPrice, riskTolerance = 5, accountValue = 0 }) {
+export function evaluateStrategy({ legs, spotPrice, riskTolerance = 5, accountValue = 0, distribution = null }) {
   if (!Array.isArray(legs) || legs.length === 0) {
     return { valid: false, error: 'No legs supplied.' };
   }
@@ -239,7 +245,10 @@ export function evaluateStrategy({ legs, spotPrice, riskTolerance = 5, accountVa
     return acc;
   }, { delta: 0, gamma: 0, theta: 0, vega: 0 });
 
-  const pop = probabilityOfProfit(legs, spotPrice);
+  const dist = distribution?.grid?.length ? distribution : null;
+  const payoff = (S) => totalPayoffAt(legs, S);
+  const pop = dist ? probPayoffPositive(dist, payoff) : probabilityOfProfit(legs, spotPrice);
+  const expectedValue = dist ? expectedPayoff(dist, payoff) : null;
   const fit = fitScore({
     legs, maxLoss: extremes.maxLoss, maxProfit: extremes.maxProfit,
     pop, riskTolerance, accountValue,
@@ -264,6 +273,9 @@ export function evaluateStrategy({ legs, spotPrice, riskTolerance = 5, accountVa
     maxLoss: extremes.maxLoss,
     breakevens: extremes.breakevens,
     probabilityOfProfit: pop,
+    popMethod: dist ? 'implied' : 'lognormal',
+    expectedValue,
+    distributionShape: dist?.shape ?? null,
     greeks: {
       delta: +greeks.delta.toFixed(2),
       gamma: +greeks.gamma.toFixed(4),

@@ -20,6 +20,7 @@
  */
 
 import { bsCallPrice } from './leapsAnalyzer.js';
+import { buildImpliedDistribution, probBelow, lognormalProbBelow, distributionSummary } from './impliedDistribution.js';
 
 // ─── Thesis definition ───────────────────────────────────
 
@@ -275,13 +276,62 @@ export function buildTermIv(chains, asOf) {
     .sort((a, b) => a.dte - b.dte);
 }
 
+// ─── Credit stress ───────────────────────────────────────
+
+// Credit spreads are the market's earliest stress gauge ("always keep your
+// eye on credit — it's the first thing to wake up", Karsan, Nov 2026). Without
+// a free CDS / OAS feed we proxy spreads with the HYG ÷ IEF price ratio:
+// high-yield bonds underperforming 7–10y Treasuries ⇔ junk spreads widening.
+// Same 50/200-DMA trend logic the rest of the app uses for price trends.
+const CREDIT_MIN_POINTS = 200;
+const CREDIT_ROC_DAYS = 20;
+
+/**
+ * HYG/IEF ratio trend as a credit-spread proxy.
+ * @param {{hyg?: number[], ief?: number[]}} p  daily closes, oldest → newest
+ * @returns {null | {ratio:number, vs50Pct:number, vs200Pct:number, chg20Pct:number, status:'supports'|'neutral'|'against', detail:string}}
+ */
+export function computeCreditStress({ hyg, ief } = {}) {
+  if (!Array.isArray(hyg) || !Array.isArray(ief)) return null;
+  const n = Math.min(hyg.length, ief.length);
+  if (n < CREDIT_MIN_POINTS) return null;
+  const h = hyg.slice(-n);
+  const t = ief.slice(-n);
+  const ratio = h.map((v, i) => (v > 0 && t[i] > 0 ? v / t[i] : NaN));
+  if (ratio.some((r) => !Number.isFinite(r))) return null;
+  const avg = (k) => ratio.slice(-k).reduce((a, b) => a + b, 0) / k;
+  const last = ratio[n - 1];
+  const sma50 = avg(50);
+  const sma200 = avg(200);
+  const vs50Pct = (last / sma50 - 1) * 100;
+  const vs200Pct = (last / sma200 - 1) * 100;
+  const chg20Pct = (last / ratio[n - 1 - CREDIT_ROC_DAYS] - 1) * 100;
+  const below50 = vs50Pct < 0;
+  const below200 = vs200Pct < 0;
+  const status = below50 && below200 ? 'supports' : !below50 && !below200 ? 'against' : 'neutral';
+  const fmt = (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+  const read = status === 'supports'
+    ? 'junk lagging Treasuries — credit spreads widening'
+    : status === 'against'
+      ? 'junk keeping pace with Treasuries — credit calm'
+      : 'mixed — spreads drifting, not yet a trend';
+  return {
+    ratio: +last.toFixed(4),
+    vs50Pct: +vs50Pct.toFixed(2),
+    vs200Pct: +vs200Pct.toFixed(2),
+    chg20Pct: +chg20Pct.toFixed(2),
+    status,
+    detail: `HYG/IEF ${fmt(vs50Pct)} vs 50-DMA, ${fmt(vs200Pct)} vs 200-DMA, ${fmt(chg20Pct)} over 20d — ${read}`,
+  };
+}
+
 // ─── Scorecard ───────────────────────────────────────────
 
 /**
  * Compare live data to the conditions the thesis relies on.
  * status: 'supports' | 'neutral' | 'against'
  */
-export function buildScorecard({ crash = null, volatility = null, spy = null, termIv = [] }) {
+export function buildScorecard({ crash = null, volatility = null, spy = null, termIv = [], credit = null }) {
   const checks = [];
   const factor = (k) => crash?.factors?.find((f) => f.key === k) || null;
   const vix = volatility?.vixLevel ?? null;
@@ -332,6 +382,14 @@ export function buildScorecard({ crash = null, volatility = null, spy = null, te
     });
   }
 
+  if (credit?.status) {
+    checks.push({
+      key: 'credit', label: 'Credit stress (junk vs Treasuries)',
+      status: credit.status,
+      detail: credit.detail,
+    });
+  }
+
   const breadth = factor('breadth');
   if (breadth?.score != null) {
     checks.push({
@@ -352,7 +410,7 @@ export function buildScorecard({ crash = null, volatility = null, spy = null, te
   const supportCount = checks.filter((c) => c.status === 'supports').length;
   const againstCount = checks.filter((c) => c.status === 'against').length;
   // Cheap vol + skew are ENTRY conditions, not confirmation; separate them.
-  const confirmKeys = ['curve', 'cot', 'trend', 'breadth', 'composite'];
+  const confirmKeys = ['curve', 'cot', 'trend', 'breadth', 'composite', 'credit'];
   const confirming = checks.filter((c) => confirmKeys.includes(c.key) && c.status === 'supports').length;
   let verdict;
   if (confirming >= 3) verdict = 'Market data is confirming the drawdown thesis.';
@@ -360,6 +418,104 @@ export function buildScorecard({ crash = null, volatility = null, spy = null, te
   else verdict = 'No confirmation yet — the thesis is a timing call, not something the data shows today.';
 
   return { checks, supportCount, againstCount, confirming, verdict };
+}
+
+// ─── Market-implied crash odds ───────────────────────────
+
+/**
+ * What the options market itself prices for a 10/20/30% decline by the
+ * expiry nearest the kill switch — the Karsan drawdown range expressed as
+ * risk-neutral probabilities (Breeden–Litzenberger, impliedDistribution.js).
+ * Thesis chains are puts-only, so the forward is the carry forward.
+ * @param {object} p
+ * @param {number} p.asOf
+ * @param {object[]} p.chains  [{expirationDate (s), underlyingPrice, puts, calls}]
+ * @param {object} [p.thesis]
+ * @param {number} [p.dividendYield]
+ * @returns {object|null}
+ */
+export function buildImpliedCrashOdds({ asOf, chains = [], thesis = KARSAN_THESIS, dividendYield = SPY_DIV_YIELD } = {}) {
+  const usable = (chains || []).filter((c) => c?.underlyingPrice > 0 && c?.expirationDate * 1000 > asOf);
+  if (!usable.length) return null;
+  const target = toMs(thesis.killSwitchDate);
+  const chain = usable.reduce((a, c) => (Math.abs(c.expirationDate * 1000 - target) < Math.abs(a.expirationDate * 1000 - target) ? c : a));
+  const dte = (chain.expirationDate * 1000 - asOf) / 86400000;
+  const dist = buildImpliedDistribution({
+    calls: chain.calls || [], puts: chain.puts || [], spot: chain.underlyingPrice, daysToExpiry: dte,
+    riskFreeRate: RISK_FREE, dividendYield,
+  });
+  if (!dist) return null;
+  const S = chain.underlyingPrice;
+  const rows = [0.10, 0.20, 0.30].map((m) => ({ decline: m, implied: probBelow(dist, S * (1 - m)), lognormal: lognormalProbBelow(dist, S * (1 - m)) }));
+  const p20 = rows[1].implied;
+  return {
+    expiry: chain.expirationDate,
+    expiryLabel: isoDate(chain.expirationDate * 1000),
+    dte: Math.round(dte),
+    spot: S,
+    rows,
+    summary: distributionSummary(dist),
+    note: `Options price a ${(p20 * 100).toFixed(0)}% chance of SPY ≤ −20% by ${isoDate(chain.expirationDate * 1000)} (risk-neutral; includes the crash-insurance premium, so real-world odds are usually lower).`,
+  };
+}
+
+// ─── Alerts ──────────────────────────────────────────────
+
+const ALERT_SEVERITY_RANK = { critical: 0, warning: 1, info: 2 };
+const RADAR_WATCH_LEVELS = ['watch', 'elevated', 'high', 'severe'];
+const RADAR_ELEVATED_LEVELS = ['elevated', 'high', 'severe'];
+const KILL_SWITCH_WARN_DAYS = 14;
+
+/**
+ * Turn the live thesis state into alert conditions (stateless — use
+ * `diffAlerts` to decide what is *new* since the last check).
+ * @param {object} p
+ * @param {{score?:number, level?:string, label?:string}} [p.crash]
+ * @param {{status?:string, detail?:string}} [p.credit]       computeCreditStress output
+ * @param {{confirming?:number}} [p.scorecard]
+ * @param {{phase?:string, label?:string, daysToKillSwitch?:number}} [p.phase]
+ * @returns {{key:string, severity:'critical'|'warning'|'info', title:string, message:string}[]}
+ */
+export function evaluateThesisAlerts({ crash = null, credit = null, scorecard = null, phase = null } = {}) {
+  const alerts = [];
+  const score = Number.isFinite(crash?.score) ? crash.score : null;
+  const level = score != null ? crash.level : null;
+  const radarTxt = score != null ? `Crash Radar ${crash.label || level} ${score.toFixed(0)}/100` : '';
+  const creditStress = credit?.status === 'supports';
+
+  if (RADAR_ELEVATED_LEVELS.includes(level)) {
+    alerts.push({ key: 'radar-elevated', severity: 'warning', title: 'Crash Radar elevated', message: `${radarTxt} — pause new risk, review hedges.` });
+  } else if (RADAR_WATCH_LEVELS.includes(level)) {
+    alerts.push({ key: 'radar-watch', severity: 'info', title: 'Crash Radar on Watch', message: `${radarTxt} — risk rising from Calm.` });
+  }
+  if (creditStress) {
+    alerts.push({ key: 'credit-stress', severity: 'warning', title: 'Credit stress', message: credit.detail || 'High-yield credit lagging Treasuries.' });
+  }
+  if (creditStress && RADAR_WATCH_LEVELS.includes(level)) {
+    alerts.push({ key: 'aligned', severity: 'critical', title: 'Crash Radar + credit lining up', message: `${radarTxt} while credit spreads widen — the Karsan early-warning combination.` });
+  }
+  if ((scorecard?.confirming ?? 0) >= 3) {
+    alerts.push({ key: 'confirmed', severity: 'critical', title: 'Thesis confirmed by data', message: `${scorecard.confirming} confirmation signals are live (trend, breadth, curve, COT, composite, credit).` });
+  }
+  if (phase?.phase === 'underway' || phase?.phase === 'capitulation') {
+    alerts.push({ key: `phase-${phase.phase}`, severity: 'critical', title: phase.label || phase.phase, message: PHASES[phase.phase].action });
+  }
+  const dKill = phase?.daysToKillSwitch;
+  if (phase?.phase === 'window-open' && Number.isFinite(dKill) && dKill >= 0 && dKill <= KILL_SWITCH_WARN_DAYS) {
+    alerts.push({ key: 'kill-switch-near', severity: 'info', title: 'Kill switch approaching', message: `${dKill} days to the end-of-March kill switch with no drawdown underway — plan to close hedges and turn long.` });
+  }
+  return alerts.sort((a, b) => ALERT_SEVERITY_RANK[a.severity] - ALERT_SEVERITY_RANK[b.severity]);
+}
+
+/**
+ * Alerts that were not active at the previous check.
+ * @param {{key:string}[]} current
+ * @param {string[]} previousKeys
+ */
+export function diffAlerts(current, previousKeys) {
+  if (!Array.isArray(current)) return [];
+  const prev = new Set(Array.isArray(previousKeys) ? previousKeys : []);
+  return current.filter((a) => a?.key && !prev.has(a.key));
 }
 
 // ─── Trade construction ──────────────────────────────────
@@ -763,6 +919,7 @@ export function buildDebasementPanel(assets = []) {
  * @param {number} [p.equityExposurePct=0.8]  fraction of portfolio in equities (0–1.5)
  * @param {number} [p.flyTarget=0.20]         crash-target butterfly decline (fraction, 0.05–0.50)
  * @param {number|null} [p.flyExpiry]         butterfly expiry (seconds); default = post-midterm cycle
+ * @param {{hyg?:number[], ief?:number[]}} [p.creditInputs]  daily closes for the credit-spread proxy
  */
 export function buildCrashThesis(p = {}) {
   const asOf = Number.isFinite(p.asOf) ? p.asOf : 0;
@@ -777,7 +934,10 @@ export function buildCrashThesis(p = {}) {
 
   const phase = computeThesisPhase({ asOf, crash, spy, vixLevel: volatility?.vixLevel ?? null });
   const termIv = buildTermIv(p.chains, asOf);
-  const scorecard = buildScorecard({ crash, volatility, spy, termIv });
+  const credit = computeCreditStress(p.creditInputs || {});
+  const scorecard = buildScorecard({ crash, volatility, spy, termIv, credit });
+  const alerts = evaluateThesisAlerts({ crash, credit, scorecard, phase });
+  const impliedCrashOdds = buildImpliedCrashOdds({ asOf, chains: p.chains, dividendYield: underlying.dividendYield });
   const { trades, unavailable, horizon, spot } = buildCrashTrades({ asOf, chains: p.chains, budget, underlying });
   const butterflies = buildButterflies({ asOf, chains: p.chains, underlying, targetDecline: p.flyTarget, expiryTs: p.flyExpiry });
   const impact = portfolioImpact({ trades, portfolioValue, equityExposurePct });
@@ -815,6 +975,9 @@ export function buildCrashThesis(p = {}) {
     headline,
     phase,
     scorecard,
+    credit,
+    alerts,
+    impliedCrashOdds,
     termIv,
     spot: spot ?? null,
     horizon,

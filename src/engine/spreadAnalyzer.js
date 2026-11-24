@@ -33,6 +33,13 @@
  *     distribution, time-varying dividends, and early-exercise risk for
  *     American-style options. Use as a relative ranking signal, not a
  *     guarantee.
+ *   - PREFERRED: pass `distribution` (impliedDistribution.buildImpliedDistribution
+ *     for the same expiry). PoP, expected value and the probabilities of max
+ *     profit / max loss are then integrated over the options-implied
+ *     (Breeden–Litzenberger) density, which carries the chain's skew and fat
+ *     tails. The lognormal figure is kept as `popLognormal` for comparison.
+ *     Under the implied density a fairly priced spread has EV ≈ 0 — a large
+ *     positive EV means the spread is cheap relative to the rest of the chain.
  *
  * LEAPS support:
  *   - The analyzer is time-horizon agnostic — daysToExpiry can be any
@@ -40,6 +47,8 @@
  *     becomes important; pass dividendYield to enable that adjustment.
  *   - See isLeaps() and formatDTE() helpers for UI categorisation.
  */
+
+import { probPayoffPositive, expectedPayoff } from './impliedDistribution.js';
 
 // ── Math helpers ──────────────────────────────────────────────────────────
 
@@ -120,6 +129,9 @@ export function expiryCategory(daysToExpiry) {
   if (daysToExpiry < 270)  return 'quarterly';
   return 'leaps';
 }
+
+const MAX_DIST_DTE_MISMATCH = 3; // days — a distribution from another expiry is not used
+const TAIL_EPS = 1e-6;            // $/share tolerance when testing "at max profit/loss"
 
 const midPrice = (c) => {
   const bid = c.bid ?? 0;
@@ -263,6 +275,7 @@ const STRATEGY_DEFS = {
  * @property {number} [maxLegSpreadToWidth=Infinity]  reject when (ask−bid of long leg + ask−bid of short leg) / strike width exceeds this — the mid-price is noise when quotes are wider than the spread itself
  * @property {number} [riskFreeRate=0.045]
  * @property {number} [dividendYield=0]               annualised, used for forward-price drift in PoP calc (LEAPS-relevant)
+ * @property {object|null} [distribution=null]       options-implied distribution for THIS expiry (see impliedDistribution.js); ignored if its DTE differs by > 3 days
  *
  * @param {AnalyzeParams} params
  * @returns {SpreadCandidate[]}            sorted by compositeScore desc
@@ -287,6 +300,7 @@ export function analyzeSpreads(params) {
     maxLegSpreadToWidth = Infinity,
     riskFreeRate = 0.045,
     dividendYield = 0,
+    distribution = null,
   } = params;
 
   const def = STRATEGY_DEFS[spreadType];
@@ -303,6 +317,9 @@ export function analyzeSpreads(params) {
 
   const T = Math.max(daysToExpiry, 0) / 365;
   const candidates = [];
+  const dist = distribution?.grid?.length && Math.abs((distribution.daysToExpiry ?? -Infinity) - daysToExpiry) <= MAX_DIST_DTE_MISMATCH
+    ? distribution : null;
+  const intrinsic = (c, S) => (def.legType === 'call' ? Math.max(0, S - c.strike) : Math.max(0, c.strike - S));
 
   // Compute average IV from legs that have a non-zero IV, for fallback use.
   // Yahoo Finance often returns impliedVolatility: 0 for illiquid strikes,
@@ -370,9 +387,13 @@ export function analyzeSpreads(params) {
       // Probability of profit using short-leg IV (most relevant for credit;
       // for debit spreads we use the same — long-leg IV is also reasonable).
       const sigma = (shortLeg.impliedVolatility > 0 ? shortLeg.impliedVolatility : null) ?? avgLegIV;
-      const pop = probabilityCrosses(
+      const popLognormal = probabilityCrosses(
         underlyingPrice, breakeven, sigma, T, popDirection, riskFreeRate, dividendYield
       );
+      // Options-implied distribution (preferred): integrate the expiry payoff.
+      const payoff = (S) => intrinsic(longLeg, S) - intrinsic(shortLeg, S) - netCost;
+      const popImplied = dist ? probPayoffPositive(dist, payoff) : null;
+      const pop = popImplied ?? popLognormal;
 
       if (minProbabilityOfProfit > 0 && (pop == null || pop < minProbabilityOfProfit)) continue;
 
@@ -386,9 +407,13 @@ export function analyzeSpreads(params) {
       if (Number.isFinite(maxBreakevenMoveRatio) && breakevenMoveRatio != null
           && breakevenMoveRatio > maxBreakevenMoveRatio) continue;
 
-      const ev = pop != null
-        ? pop * maxProfit - (1 - pop) * maxLoss
-        : null;
+      // EV: implied density integrates the full payoff; lognormal uses the
+      // binary win/lose approximation.
+      const ev = popImplied != null
+        ? expectedPayoff(dist, payoff) * 100
+        : pop != null ? pop * maxProfit - (1 - pop) * maxLoss : null;
+      const probMaxProfit = dist ? probPayoffPositive(dist, (S) => payoff(S) - maxProfitPerShare + TAIL_EPS) : null;
+      const probMaxLoss = dist ? probPayoffPositive(dist, (S) => -maxLossPerShare + TAIL_EPS - payoff(S)) : null;
 
       candidates.push({
         type: spreadType,
@@ -409,6 +434,10 @@ export function analyzeSpreads(params) {
         expectedMovePct,
         breakevenMoveRatio,
         probabilityOfProfit: pop,
+        popMethod: popImplied != null ? 'implied' : 'lognormal',
+        popLognormal,
+        probMaxProfit,
+        probMaxLoss,
         expectedValue: ev,
         liquidityScore: Math.min(liqLong, liqShort),
         daysToExpiry,
